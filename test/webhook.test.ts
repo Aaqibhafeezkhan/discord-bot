@@ -95,7 +95,7 @@ describe("starter issue feed", () => {
     expect(await handleGithubEvent("issues", issueEvent("labeled", {}, "good first issue"), env, cfg)).toBe("posted starter issue");
 
     expect(await handleGithubEvent("issues", issueEvent("edited", { title: "Updated title" }), env, cfg)).toBe("updated starter issue (open)");
-    expect(await handleGithubEvent("issues", issueEvent("labeled", { labels: [{ name: "bug" }, { name: "good first issue" }, { name: "help wanted" }] }, "help wanted")).toBe("updated starter issue (open)");
+    expect(await handleGithubEvent("issues", issueEvent("labeled", { labels: [{ name: "bug" }, { name: "good first issue" }, { name: "help wanted" }] }, "help wanted"), env, cfg)).toBe("updated starter issue (open)");
     expect(await handleGithubEvent("issues", issueEvent("assigned", { assignees: [{ login: "ada" }] }), env, cfg)).toBe("updated starter issue (claimed)");
 
     expect(fetched.discord()).toHaveLength(4);
