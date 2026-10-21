@@ -325,6 +325,7 @@ describe("merged pull requests", () => {
       number: 139,
       title: "fix(url-encoder): show an error",
       html_url: "https://github.com/codercops/toolbelt/pull/139",
+      repository_url: "https://api.github.com/repos/codercops/toolbelt",
       merged: true,
       merged_at: "2026-10-11T16:20:00Z",
       user,
@@ -338,9 +339,9 @@ describe("merged pull requests", () => {
     const fetched = mockFetch(() => ({
       total_count: 3,
       items: [
-        { html_url: "https://github.com/codercops/toolbelt/pull/1", user: { login: "ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } },
-        { html_url: "https://github.com/codercops/chatcops/pull/2", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
-        { html_url: "https://github.com/codercops/ogcops/pull/3", user: { login: "bob" }, pull_request: { merged_at: "2026-10-04T00:00:00Z" } },
+        { html_url: "https://github.com/codercops/toolbelt/pull/1", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } },
+        { html_url: "https://github.com/codercops/chatcops/pull/2", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
+        { html_url: "https://github.com/codercops/ogcops/pull/3", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "bob" }, pull_request: { merged_at: "2026-10-04T00:00:00Z" } },
       ],
     }));
     expect(await handleGithubEvent("pull_request", prEvent(), env, cfg)).toBe("posted merged pull request");
@@ -348,7 +349,7 @@ describe("merged pull requests", () => {
     expect(post?.url).toBe("https://discord.com/api/v10/channels/chan-merged/messages");
     expect(post?.body.embeds[0].description).toContain("That's their 3rd merged PR on the Hacktoberfest 2026 leaderboard.");
     expect(fetched.calls.filter((c) => c.url.startsWith("https://api.github.com/"))).toHaveLength(1);
-    const cached = JSON.parse(env.STATE.store.get("leaderboard:v2:2026-10") ?? "{}");
+    const cached = JSON.parse(env.STATE.store.get("leaderboard:v3:2026-10") ?? "{}");
     expect(cached.rows).toEqual(
       expect.arrayContaining([expect.objectContaining({ login: "ada", count: 3 }), expect.objectContaining({ login: "bob", count: 1 })])
     );
@@ -357,19 +358,19 @@ describe("merged pull requests", () => {
   it("doesn't double count when search already includes this PR", async () => {
     const fetched = mockFetch(() => ({
       total_count: 1,
-      items: [{ html_url: "https://github.com/codercops/toolbelt/pull/139", user: { login: "ada" }, pull_request: { merged_at: "2026-10-11T16:20:00Z" } }],
+      items: [{ html_url: "https://github.com/codercops/toolbelt/pull/139", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "ada" }, pull_request: { merged_at: "2026-10-11T16:20:00Z" } }],
     }));
     await handleGithubEvent("pull_request", prEvent(), env, cfg);
     expect(fetched.discord()[0]?.body.embeds[0].description).toContain("That's their 1st merged PR");
-    const cached = JSON.parse(env.STATE.store.get("leaderboard:v2:2026-10") ?? "{}");
+    const cached = JSON.parse(env.STATE.store.get("leaderboard:v3:2026-10") ?? "{}");
     expect(cached.rows).toEqual([expect.objectContaining({ login: "ada", count: 1 })]);
   });
 
   it("clears the cached leaderboard and still posts a shoutout when search fails", async () => {
-    await env.STATE.put("leaderboard:v2:2026-10", JSON.stringify({ rows: [], generatedAt: "earlier" }));
+    await env.STATE.put("leaderboard:v3:2026-10", JSON.stringify({ rows: [], generatedAt: "earlier" }));
     const fetched = mockFetch(() => new Response("unavailable", { status: 503 }));
     await handleGithubEvent("pull_request", prEvent(), env, cfg);
-    expect(env.STATE.store.has("leaderboard:v2:2026-10")).toBe(false);
+    expect(env.STATE.store.has("leaderboard:v3:2026-10")).toBe(false);
     expect(fetched.discord()).toHaveLength(1);
     expect(fetched.discord()[0]?.body.embeds[0].description).not.toContain("That's their");
   });
@@ -379,6 +380,9 @@ describe("merged pull requests", () => {
       Array.from({ length: n }, (_, i) => ({
         html_url: `https://github.com/codercops/toolbelt/pull/${i + 1}`,
         user: { login: "ada" },
+        number: 1, 
+        title: "Fix a thing", 
+        repository_url: "https://api.github.com/repos/codercops/toolbelt",
         pull_request: { merged_at: `2026-10-0${i + 1}T00:00:00Z` },
       }));
     const description = async (others: number) => {

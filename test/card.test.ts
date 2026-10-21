@@ -17,7 +17,7 @@ vi.mock("../src/card-image", () => ({
 }));
 
 const program = getConfig(makeEnv()).programs[0]!;
-const row = (login: string, count: number, qualifies = false, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", qualifies, winner });
+const row = (login: string, count: number, qualifies = false, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", prs: [], qualifies, winner });
 const during = new Date("2026-10-12T04:30:00Z");
 
 describe("card layout helpers", () => {
@@ -272,9 +272,9 @@ describe("GET /leaderboard/{id}/u/{login}", () => {
   const search = () => ({
     total_count: 3,
     items: [
-      { html_url: "https://github.com/codercops/toolbelt/pull/1", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } },
-      { html_url: "https://github.com/codercops/toolbelt/pull/2", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
-      { html_url: "https://github.com/codercops/toolbelt/pull/3", user: { login: "noavatar" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
+      { html_url: "https://github.com/codercops/toolbelt/pull/1", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } },
+      { html_url: "https://github.com/codercops/toolbelt/pull/2", number: 2, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
+      { html_url: "https://github.com/codercops/toolbelt/pull/3", number: 3, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "noavatar" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
     ],
   });
   beforeEach(() => {
@@ -352,7 +352,7 @@ describe("HEAD /leaderboard/{id}/u/{login}", () => {
   const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
   const search = () => ({
     total_count: 1,
-    items: [{ html_url: "https://github.com/codercops/toolbelt/pull/1", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } }],
+    items: [{ html_url: "https://github.com/codercops/toolbelt/pull/1", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } }],
   });
   const get = (path: string) => worker.fetch(new Request(`https://bot.example${path}`), env, ctx);
   const head = (path: string) => worker.fetch(new Request(`https://bot.example${path}`, { method: "HEAD" }), env, ctx);
@@ -390,7 +390,7 @@ describe("the card cache", () => {
   let env = makeEnv();
   const search = () => ({
     total_count: 1,
-    items: [{ html_url: "https://github.com/codercops/toolbelt/pull/1", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } }],
+    items: [{ html_url: "https://github.com/codercops/toolbelt/pull/1", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } }],
   });
   let cache: FakeCache;
   beforeEach(() => {
@@ -441,6 +441,9 @@ describe("GET /leaderboard/{id}.png", () => {
   const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
   const pr = (n: number, login: string) => ({
     html_url: `https://github.com/codercops/toolbelt/pull/${n}`,
+    number: n,
+    title: `PR ${n}`,
+    repository_url: "https://api.github.com/repos/codercops/toolbelt",
     user: { login },
     pull_request: { merged_at: `2026-10-0${(n % 9) + 1}T00:00:00Z` },
   });
@@ -527,7 +530,7 @@ describe("the board image cache", () => {
   let env = makeEnv();
   const search = () => ({
     total_count: 1,
-    items: [{ html_url: "https://github.com/codercops/toolbelt/pull/1", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } }],
+    items: [{ html_url: "https://github.com/codercops/toolbelt/pull/1", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } }],
   });
   let cache: FakeCache;
   beforeEach(() => {
