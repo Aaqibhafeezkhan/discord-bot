@@ -109,13 +109,25 @@ async function writeFeed(env: Env, record: FeedRecord | null, issue: StarterIssu
   const message = starterIssueMessage(issue, state);
   const snapshot = starterIssueSnapshot(message);
   if (record?.message === snapshot) return "unchanged starter issue";
+  if (record) {
+    try {
+      await editMessage(env, env.CHANNEL_STARTER_ISSUES, record.messageId, message);
+    } catch (err) {
+      if (!messageGone(err)) throw err;
+      if (state.kind !== "open") {
+        await env.STATE.delete(feedKey(issue.repo, issue.number));
+        return "starter issue message gone, record removed";
+      }
+      record = null;
+    }
+  }
   const messageId = record?.messageId ?? (await sendMessage(env, env.CHANNEL_STARTER_ISSUES, message));
-  if (record) await editMessage(env, env.CHANNEL_STARTER_ISSUES, record.messageId, message);
   await env.STATE.put(feedKey(issue.repo, issue.number), JSON.stringify({ messageId, state: state.kind, message: snapshot } satisfies FeedRecord));
   return record ? `updated starter issue (${state.kind})` : "posted starter issue";
 }
 
 const rateLimited = (err: unknown) => err instanceof DiscordError && err.status === 429;
+const messageGone = (err: unknown) => err instanceof DiscordError && err.status === 404;
 
 // Keeps one message per issue in #starter-issues and edits it as the issue is
 // claimed, released or closed, so the feed always shows what's really free.

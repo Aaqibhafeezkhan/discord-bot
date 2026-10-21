@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getConfig } from "../src/config";
 import { handleGithubEvent, isStarterIssue, resyncStarterIssues, starterState } from "../src/webhook";
-import { makeEnv, mockFetch } from "./helpers";
+import { makeEnv, mockFetch, type RecordedCall } from "./helpers";
 
 const repository = { name: "toolbelt", owner: { login: "codercops" } };
 let env = makeEnv();
@@ -424,10 +424,10 @@ describe("merged pull requests", () => {
   });
 });
 
-describe("rate limited starter issue feed", () => {
-  const rateLimit = () => new Response(JSON.stringify({ retry_after: 30 }), { status: 429 });
-  const onGithub = (over: Record<string, unknown> = {}) => () => ({ ...issueEvent("edited").issue, ...over });
+const rateLimit = () => new Response(JSON.stringify({ retry_after: 30 }), { status: 429 });
+const onGithub = (over: Record<string, unknown> = {}) => () => ({ ...issueEvent("edited").issue, ...over });
 
+describe("rate limited starter issue feed", () => {
   it("marks the issue instead of failing when Discord answers 429, and the cron posts it", async () => {
     mockFetch(undefined, rateLimit);
     expect(await handleGithubEvent("issues", issueEvent("labeled", {}, "good first issue"), env, cfg)).toBe(
@@ -513,6 +513,144 @@ describe("rate limited starter issue feed", () => {
     mockFetch(undefined, () => new Response("{}", { status: 500 }));
     await expect(handleGithubEvent("issues", issueEvent("labeled", {}, "good first issue"), env, cfg)).rejects.toThrow("Discord 500");
     expect(await env.STATE.get("resync:toolbelt#124")).toBeNull();
+  });
+});
+
+describe("deleted starter issue message", () => {
+  const unknownMessage = (call: RecordedCall) => (call.method === "PATCH" ? new Response(JSON.stringify({ message: "Unknown Message", code: 10008 }), { status: 404 }) : undefined);
+  const storeRecord = (state: string) => env.STATE.put("issue:toolbelt#124", JSON.stringify({ messageId: "deleted-msg", state, message: "old" }));
+  const record = () => env.STATE.get("issue:toolbelt#124", "json");
+
+  it("posts a new message when the issue is free, and edits that one next time", async () => {
+    await storeRecord("claimed");
+    const fetched = mockFetch(undefined, unknownMessage);
+    expect(await handleGithubEvent("issues", issueEvent("unassigned"), env, cfg)).toBe("posted starter issue");
+    expect(fetched.discord().map((c) => `${c.method} ${c.url}`)).toEqual(["PATCH https://discord.com/api/v10/channels/chan-issues/messages/deleted-msg", "POST https://discord.com/api/v10/channels/chan-issues/messages"]);
+    expect(await record()).toMatchObject({ messageId: "msg-1", state: "open" });
+
+    const next = mockFetch();
+    expect(await handleGithubEvent("issues", issueEvent("assigned", { assignees: [{ login: "ada" }] }), env, cfg)).toBe("updated starter issue (claimed)");
+    expect(next.discord()).toHaveLength(1);
+    expect(next.discord()[0]).toMatchObject({ method: "PATCH", url: "https://discord.com/api/v10/channels/chan-issues/messages/msg-1" });
+  });
+
+  it("removes the record when the issue isn't free, and posts again once it is", async () => {
+    await storeRecord("open");
+    const fetched = mockFetch(undefined, unknownMessage);
+    expect(await handleGithubEvent("issues", issueEvent("assigned", { assignees: [{ login: "ada" }] }), env, cfg)).toBe("starter issue message gone, record removed");
+    expect(fetched.discord()).toHaveLength(1);
+    expect(await record()).toBeNull();
+
+    expect(await handleGithubEvent("issues", issueEvent("edited", { title: "New title", assignees: [{ login: "ada" }] }), env, cfg)).toBe("ignored issue");
+    expect(await handleGithubEvent("issues", issueEvent("unassigned"), env, cfg)).toBe("posted starter issue");
+    expect(fetched.discord().filter((c) => c.method === "POST")).toHaveLength(1);
+    expect(await record()).toMatchObject({ messageId: "msg-1", state: "open" });
+  });
+
+  it("removes the record when the issue is done or no longer available", async () => {
+    for (const closed of [issueEvent("closed", { state: "closed" }), issueEvent("closed", { state: "closed", state_reason: "not_planned" }), issueEvent("deleted")]) {
+      await storeRecord("open");
+      const fetched = mockFetch(undefined, unknownMessage);
+      expect(await handleGithubEvent("issues", closed, env, cfg)).toBe("starter issue message gone, record removed");
+      expect(fetched.discord()).toHaveLength(1);
+      expect(await record()).toBeNull();
+    }
+  });
+
+  it("posts a new message from the resync when the issue is free", async () => {
+    await storeRecord("claimed");
+    await env.STATE.put("resync:toolbelt#124", "1");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetched = mockFetch(onGithub(), unknownMessage);
+    await resyncStarterIssues(env, cfg);
+    expect(fetched.discord().map((c) => c.method)).toEqual(["PATCH", "POST"]);
+    expect(await record()).toMatchObject({ messageId: "msg-1", state: "open" });
+    expect(await env.STATE.get("resync:toolbelt#124")).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("removes the record from the resync when the issue isn't free", async () => {
+    await storeRecord("open");
+    await env.STATE.put("resync:toolbelt#124", "1");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetched = mockFetch(onGithub({ assignees: [{ login: "ada" }] }), unknownMessage);
+    await resyncStarterIssues(env, cfg);
+    expect(fetched.discord().map((c) => c.method)).toEqual(["PATCH"]);
+    expect(await record()).toBeNull();
+    expect(await env.STATE.get("resync:toolbelt#124")).toBeNull();
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("queues a resync when the new post is rate limited, and the cron posts it", async () => {
+    await storeRecord("claimed");
+    mockFetch(undefined, (call) => unknownMessage(call) ?? rateLimit());
+    expect(await handleGithubEvent("issues", issueEvent("unassigned"), env, cfg)).toBe("starter issue rate limited, resync queued");
+    expect(await env.STATE.get("resync:toolbelt#124")).toBe("1");
+    expect(await record()).toMatchObject({ messageId: "deleted-msg" });
+
+    mockFetch(onGithub(), unknownMessage);
+    await resyncStarterIssues(env, cfg);
+    expect(await record()).toMatchObject({ messageId: "msg-1", state: "open" });
+    expect(await env.STATE.get("resync:toolbelt#124")).toBeNull();
+  });
+
+  it("posts the issue as it is now and skips the next unchanged event", async () => {
+    await env.STATE.put("issue:toolbelt#124", JSON.stringify({ messageId: "deleted-msg", state: "open" }));
+    const fetched = mockFetch(undefined, unknownMessage);
+    const edited = issueEvent("edited", { title: "Updated title" });
+    expect(await handleGithubEvent("issues", edited, env, cfg)).toBe("posted starter issue");
+    const post = fetched.discord()[1];
+    expect(post?.method).toBe("POST");
+    expect(post?.body.embeds[0].title).toContain("Updated title");
+    expect(post?.body.embeds[0].description).toContain("Comment on the issue to claim it");
+    expect(post?.body.allowed_mentions).toEqual({ parse: [] });
+
+    expect(await handleGithubEvent("issues", edited, env, cfg)).toBe("unchanged starter issue");
+    expect(fetched.discord()).toHaveLength(2);
+  });
+
+  it("keeps going with the other marked issues in the resync", async () => {
+    await storeRecord("open");
+    await env.STATE.put("issue:toolbelt#125", JSON.stringify({ messageId: "live-msg", state: "open", message: "old" }));
+    await env.STATE.put("resync:toolbelt#124", "1");
+    await env.STATE.put("resync:toolbelt#125", "1");
+    const fetched = mockFetch((url) => ({ ...issueEvent("edited").issue, number: Number(url.pathname.split("/").pop()), assignees: [{ login: "ada" }] }), (call) => (call.url.endsWith("/deleted-msg") ? unknownMessage(call) : undefined));
+    await resyncStarterIssues(env, cfg);
+    expect(fetched.discord().map((c) => c.url.split("/").pop())).toEqual(["deleted-msg", "live-msg"]);
+    expect(await record()).toBeNull();
+    expect(await env.STATE.get("issue:toolbelt#125", "json")).toMatchObject({ messageId: "live-msg", state: "claimed" });
+    expect((await env.STATE.list({ prefix: "resync:" })).keys).toHaveLength(0);
+  });
+
+  it("fails as before when the new post fails too", async () => {
+    await storeRecord("claimed");
+    const fetched = mockFetch(undefined, () => new Response(JSON.stringify({ message: "Unknown Channel", code: 10003 }), { status: 404 }));
+    await expect(handleGithubEvent("issues", issueEvent("unassigned"), env, cfg)).rejects.toThrow("Discord 404");
+    expect(fetched.discord().map((c) => c.method)).toEqual(["PATCH", "POST"]);
+    expect(await record()).toMatchObject({ messageId: "deleted-msg", state: "claimed" });
+  });
+
+  it("lets other Discord errors on the edit fail as before", async () => {
+    for (const status of [500, 403, 401]) {
+      await storeRecord("claimed");
+      const fetched = mockFetch(undefined, (call) => (call.method === "PATCH" ? new Response("{}", { status }) : undefined));
+      await expect(handleGithubEvent("issues", issueEvent("unassigned"), env, cfg)).rejects.toThrow(`Discord ${status}`);
+      expect(fetched.discord().map((c) => c.method)).toEqual(["PATCH"]);
+      expect(await record()).toMatchObject({ messageId: "deleted-msg", state: "claimed" });
+      expect(await env.STATE.get("resync:toolbelt#124")).toBeNull();
+    }
+  });
+
+  it("lets a network error on the edit fail as before", async () => {
+    await storeRecord("claimed");
+    const fetched = mockFetch(undefined, () => {
+      throw new TypeError("fetch failed");
+    });
+    await expect(handleGithubEvent("issues", issueEvent("unassigned"), env, cfg)).rejects.toThrow("fetch failed");
+    expect(fetched.discord()).toHaveLength(1);
+    expect(await record()).toMatchObject({ messageId: "deleted-msg", state: "claimed" });
   });
 });
 
