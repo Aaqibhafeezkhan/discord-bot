@@ -133,7 +133,7 @@ main.wide{max-width:920px}
 h2.small{font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
 @media (max-width:520px){.tiles{grid-template-columns:1fr}.cta a{flex:1 1 100%;text-align:center}}
 footer{color:var(--muted);font-size:13px}
-@media (max-width:520px){.chip{display:none}}
+@media (max-width:520px){.board summary{gap:8px}.rank{width:auto}.board img{width:28px;height:28px}.chip,.count-label{display:none}}
 `;
 
 export interface PageLinks {
@@ -204,7 +204,7 @@ export function leaderboardPage(
             `<li><a href="${escapeHtml(pr.url)}"><span class="repo">${escapeHtml(pr.repo)}#${pr.number}</span>${escapeHtml(pr.title)}</a></li>`
         )
         .join("\n");
-      return `<li><details><summary><span class="rank">${i + 1}</span><img src="https://github.com/${encodeURIComponent(row.login)}.png?size=72" alt="" width="36" height="36" loading="lazy"><span class="who"><a href="https://github.com/${encodeURIComponent(row.login)}">${login}</a></span><span class="count">${row.count} merged ${row.count === 1 ? "PR" : "PRs"}</span>${chipHtml}${card}</summary>\n<ul class="prs">\n${prList}\n</ul></details></li>`;
+      return `<li><details><summary><span class="rank">${i + 1}</span><img src="https://github.com/${encodeURIComponent(row.login)}.png?size=72" alt="" width="36" height="36" loading="lazy"><span class="who"><a href="https://github.com/${encodeURIComponent(row.login)}">${login}</a></span><span class="count">${row.count}<span class="count-label"> merged ${row.count === 1 ? "PR" : "PRs"}</span></span>${chipHtml}${card}</summary>\n<ul class="prs">\n${prList}\n</ul></details></li>`;
     })
     .join("\n");
 
