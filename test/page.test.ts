@@ -407,7 +407,13 @@ describe("GET /leaderboard", () => {
     const json = await worker.fetch(new Request("https://bot.example/leaderboard/2026-10.json"), env, ctx);
     expect(((await json.json()) as { id: string }).id).toBe("2026-10");
 
-    expect((await worker.fetch(new Request("https://bot.example/leaderboard/2025-10"), env, ctx)).status).toBe(404);
+    const unknownHtml = await worker.fetch(new Request("https://bot.example/leaderboard/2025-10"), env, ctx);
+    expect(unknownHtml.status).toBe(404);
+    expect(unknownHtml.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(await unknownHtml.text()).toBe("not found");
+    const unknownJson = await worker.fetch(new Request("https://bot.example/leaderboard/2025-10.json"), env, ctx);
+    expect(unknownJson.status).toBe(404);
+    expect(unknownJson.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect((await worker.fetch(new Request("https://bot.example/leaderboard", { method: "POST" }), env, ctx)).status).toBe(404);
     const none = await worker.fetch(new Request("https://bot.example/leaderboard"), makeEnv({ PROGRAMS: [] }), ctx);
     expect(none.status).toBe(404);
@@ -441,6 +447,13 @@ describe("GET /leaderboard", () => {
     const res = await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(await res.text()).toBe("GitHub is rate limiting us. Try again in a minute.");
+    const json = await worker.fetch(new Request("https://bot.example/leaderboard.json"), env, ctx);
+    expect(json.status).toBe(503);
+    expect(json.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(json.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(await json.text()).toBe("GitHub is rate limiting us. Try again in a minute.");
   });
 
   it("names qualifying unlinked members when linking is enabled", async () => {

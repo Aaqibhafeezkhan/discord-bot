@@ -106,7 +106,7 @@ async function handleLeaderboardPage(request: Request, env: Env, id: string | un
   const cfg = getConfig(env);
   const now = new Date();
   const program = id === undefined ? currentProgram(cfg, now) : findProgram(cfg, id);
-  if (!program) return new Response("not found", { status: 404 });
+  if (!program) return new Response("not found", { status: 404, headers: asJson ? { "Access-Control-Allow-Origin": "*" } : undefined });
   // Browsers and the edge may reuse the response for five minutes.
   const cache = "public, max-age=300";
   try {
@@ -155,7 +155,7 @@ async function handleLeaderboardPage(request: Request, env: Env, id: string | un
     console.error("leaderboard page failed", err);
     return new Response(limited ? "GitHub is rate limiting us. Try again in a minute." : "The leaderboard is unavailable right now.", {
       status: 503,
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60" },
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60", ...(asJson ? { "Access-Control-Allow-Origin": "*" } : {}) },
     });
   }
 }
