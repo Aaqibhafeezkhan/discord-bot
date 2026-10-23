@@ -382,6 +382,114 @@ describe("/link, /unlink and /me", () => {
     });
   });
 
+  it("/me recovers a renamed GitHub login by id and uses it for counts, roles and standing", async () => {
+    await saveLink(env, ada);
+    const other = { ...ada, discordId: "77", githubLogin: "bob", githubId: "9002" };
+    await saveLink(env, other);
+    const fetched = mockFetch((url) => {
+      if (url.pathname === "/user/9001") return { id: 9001, login: "Ada-new" };
+      if (url.searchParams.get("q")?.includes("author:Ada ")) return jsonResponse({}, 422);
+      return { ...search(2)(), items: search(2)().items.map((item) => ({ ...item, user: { login: "Ada-new" } })) };
+    }, discordApi());
+
+    const reply = await run("me");
+    expect(reply.content).toContain("You're linked to **Ada-new** on GitHub.");
+    expect(reply.content).toContain("Merged PRs in our repos: **2**.");
+    expect(reply.content).toContain("2 merged PRs, 1st of 1");
+    expect(reply.content).toContain("You now have the **Contributor** role.");
+    expect(await getLink(env, "42")).toEqual({ ...ada, githubLogin: "Ada-new" });
+    expect(await getLinkByGithub(env, "Ada")).toBeNull();
+    expect(await getLinkByGithub(env, "ada-NEW")).toEqual({ ...ada, githubLogin: "Ada-new" });
+    expect(await getLink(env, "77")).toEqual(other);
+    const github = fetched.calls.filter((c) => new URL(c.url).hostname === "api.github.com");
+    expect(github.map((c) => new URL(c.url).pathname)).toEqual(["/search/issues", "/user/9001", "/search/issues", "/search/issues"]);
+    expect(new URL(github[2]!.url).searchParams.get("q")).toContain("author:Ada-new ");
+    expect(github.every((c) => c.userAgent === "codercops-discord-bot")).toBe(true);
+    expect(fetched.calls.filter((c) => c.method === "PUT").map((c) => new URL(c.url).pathname)).toEqual([
+      "/api/v10/guilds/guild-1/members/42/roles/role-contributor",
+    ]);
+
+    fetched.clear();
+    expect((await run("me")).content).toContain("**Ada-new**");
+    expect(fetched.calls.some((c) => new URL(c.url).pathname.startsWith("/user/"))).toBe(false);
+  });
+
+  it("/me uses the recovered login when deciding whether a member is a maintainer", async () => {
+    await saveLink(env, ada);
+    const fetched = mockFetch((url) => {
+      if (url.pathname === "/user/9001") return { id: 9001, login: "anurag629" };
+      return url.searchParams.get("q")?.includes("author:Ada ") ? jsonResponse({}, 422) : search(40)();
+    }, discordApi());
+    const reply = await run("me");
+    expect(reply.content).toContain("You're linked to **anurag629**");
+    expect(reply.content).toContain("You're a maintainer");
+    expect(fetched.discord()).toHaveLength(0);
+    expect(fetched.calls).toHaveLength(3);
+  });
+
+  it.each([
+    ["missing user", () => jsonResponse({}, 404)],
+    ["failed lookup", () => jsonResponse({}, 500)],
+    ["network failure", () => { throw new TypeError("offline"); }],
+    ["invalid JSON", () => new Response("not json")],
+    ["null user", () => null],
+    ["missing login", () => ({ id: 9001 })],
+    ["empty login", () => ({ id: 9001, login: "" })],
+    ["missing id", () => ({ login: "Ada-new" })],
+    ["invalid login", () => ({ id: 9001, login: "other repo:private" })],
+    ["non-string login", () => ({ id: 9001, login: 123 })],
+    ["wrong identity", () => ({ id: 9002, login: "Ada-new" })],
+  ])("/me asks to relink after a %s during rename recovery", async (_name, lookup) => {
+    await saveLink(env, ada);
+    const fetched = mockFetch((url) => url.pathname === "/user/9001" ? lookup() : jsonResponse({}, 422), discordApi());
+    const reply = await run("me");
+    expect(reply.content).toContain("Run `/link` again");
+    expect(reply.content).not.toContain("Something went wrong");
+    expect(await getLink(env, "42")).toEqual(ada);
+    expect(await getLinkByGithub(env, "Ada")).toEqual(ada);
+    expect(fetched.calls.map((c) => new URL(c.url).pathname)).toEqual(["/search/issues", "/user/9001"]);
+  });
+
+  it.each(["", "9001/other", "-1"])("/me asks to relink for an invalid stored id %s", async (githubId) => {
+    const invalid = { ...ada, githubId };
+    await saveLink(env, invalid);
+    const fetched = mockFetch(() => jsonResponse({}, 422));
+    expect((await run("me")).content).toContain("Run `/link` again");
+    expect(await getLink(env, "42")).toEqual(invalid);
+    expect(fetched.calls).toHaveLength(1);
+  });
+
+  it.each([403, 429])("/me preserves rate limiting when the id lookup returns %s", async (status) => {
+    await saveLink(env, ada);
+    const fetched = mockFetch((url) => jsonResponse({}, url.pathname === "/user/9001" ? status : 422));
+    expect((await run("me")).content).toBe("GitHub is rate limiting me right now. Try again in a minute.");
+    expect(await getLink(env, "42")).toEqual(ada);
+    expect(fetched.calls).toHaveLength(2);
+  });
+
+  it.each([401, 403, 404, 429, 500, 503])("/me does not recover an initial %s search error", async (status) => {
+    await saveLink(env, ada);
+    const fetched = mockFetch(() => jsonResponse({}, status));
+    const reply = await run("me");
+    expect(reply.content).toBe(status === 403 || status === 429
+      ? "GitHub is rate limiting me right now. Try again in a minute."
+      : "Something went wrong on my side. Try again in a bit.");
+    expect(await getLink(env, "42")).toEqual(ada);
+    expect(fetched.calls).toHaveLength(1);
+  });
+
+  it.each([422, 500])("/me stops after one recovery when the refreshed search returns %s", async (status) => {
+    await saveLink(env, ada);
+    const fetched = mockFetch((url) => {
+      if (url.pathname === "/user/9001") return { id: 9001, login: "Ada-new" };
+      return jsonResponse({}, url.searchParams.get("q")?.includes("author:Ada ") ? 422 : status);
+    }, discordApi());
+    const reply = await run("me");
+    expect(reply.content).toContain(status === 422 ? "Run `/link` again" : "Something went wrong");
+    expect(fetched.calls).toHaveLength(3);
+    expect(fetched.discord()).toHaveLength(0);
+  });
+
   it("/me shows the member's count, their place in the current program and any role they were owed", async () => {
     await saveLink(env, ada);
     const fetched = mockFetch(search(4), discordApi({ memberRoles: [] }));
@@ -395,6 +503,8 @@ describe("/link, /unlink and /me", () => {
         "Your card to share: <https://bot.example/leaderboard/2026-10/u/Ada>",
       ].join("\n")
     );
+    expect(await getLink(env, "42")).toEqual(ada);
+    expect(fetched.calls.some((c) => new URL(c.url).pathname.startsWith("/user/"))).toBe(false);
     const lifetime = fetched.calls.find((c) => c.url.includes("api.github.com") && decodeURIComponent(c.url).includes("author:Ada"));
     expect(decodeURIComponent(lifetime!.url).replace(/\+/g, " ")).toContain("is:pr is:merged author:Ada repo:codercops/chatcops repo:codercops/ogcops repo:codercops/toolbelt");
   });

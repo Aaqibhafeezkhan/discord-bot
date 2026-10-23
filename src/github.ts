@@ -43,6 +43,15 @@ async function gh<T>(env: Env, path: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Resolves a linked account's current login using the id that survives renames. */
+export async function getLoginById(env: Env, githubId: string): Promise<string | null> {
+  if (!/^[1-9]\d*$/.test(githubId)) return null;
+  const user = await gh<{ id?: number; login?: unknown } | null>(env, `/user/${githubId}`);
+  if (!user || String(user.id) !== githubId || typeof user.login !== "string") return null;
+  // Apply the same login constraints as the verified Discord connection in oauth.ts.
+  return /^[a-z\d](?:[a-z\d-]{0,38})$/i.test(user.login) ? user.login : null;
+}
+
 export interface StarterIssue {
   repo: string;
   number: number;
