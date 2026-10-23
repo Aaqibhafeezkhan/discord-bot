@@ -1,9 +1,10 @@
 // Handles GitHub webhook events: releases, starter issues and merged PRs.
 import type { Config, Env } from "./config";
-import { editMessage, sendMessage } from "./discord";
-import { countMergedPrs, searchMergedPrs, type StarterIssue } from "./github";
-import { invalidateLeaderboard } from "./leaderboard";
+import { DiscordError, editMessage, sendMessage } from "./discord";
+import { countMergedPrs, getIssue, type GithubIssue, type StarterIssue } from "./github";
+import { cacheLeaderboard, invalidateLeaderboard, recentMerges, rememberMerges, searchCountedPrs } from "./leaderboard";
 import { getLinkByGithub } from "./links";
+import { linkingEnabled } from "./oauth";
 import { grantEarnedRoles } from "./roles";
 import { mergedPrMessage, releaseMessage, starterIssueMessage, type StarterState } from "./messages";
 
@@ -23,16 +24,7 @@ interface IssuesEvent {
   repository: Repository;
   /** The label that was added or removed, on labeled/unlabeled events. */
   label?: { name: string };
-  issue: {
-    number: number;
-    title: string;
-    html_url: string;
-    state: "open" | "closed";
-    state_reason?: string | null;
-    labels: { name: string }[];
-    assignees: { login: string }[];
-    pull_request?: unknown;
-  };
+  issue: GithubIssue;
 }
 
 interface PullRequestEvent {
@@ -95,7 +87,48 @@ export function starterState(issue: IssuesEvent["issue"], cfg?: Config, action?:
 interface FeedRecord {
   messageId: string;
   state: StarterState["kind"];
+  message?: string;
 }
+
+function starterIssueSnapshot(message: ReturnType<typeof starterIssueMessage>): string {
+  const embed = message.embeds?.[0];
+  return JSON.stringify({
+    title: embed?.title,
+    url: embed?.url,
+    description: embed?.description,
+    color: embed?.color,
+  });
+}
+
+const feedKey = (repo: string, number: number) => `issue:${repo}#${number}`;
+const resyncKey = (repo: string, number: number) => `resync:${repo}#${number}`;
+/** A channel takes about five messages per five seconds; the rest wait for the next run. */
+const RESYNC_PER_RUN = 5;
+
+/** Posts the issue's message, or edits the one already posted when it changed. */
+async function writeFeed(env: Env, record: FeedRecord | null, issue: StarterIssue, state: StarterState): Promise<string> {
+  const message = starterIssueMessage(issue, state);
+  const snapshot = starterIssueSnapshot(message);
+  if (record?.message === snapshot) return "unchanged starter issue";
+  if (record) {
+    try {
+      await editMessage(env, env.CHANNEL_STARTER_ISSUES, record.messageId, message);
+    } catch (err) {
+      if (!messageGone(err)) throw err;
+      if (state.kind !== "open") {
+        await env.STATE.delete(feedKey(issue.repo, issue.number));
+        return "starter issue message gone, record removed";
+      }
+      record = null;
+    }
+  }
+  const messageId = record?.messageId ?? (await sendMessage(env, env.CHANNEL_STARTER_ISSUES, message));
+  await env.STATE.put(feedKey(issue.repo, issue.number), JSON.stringify({ messageId, state: state.kind, message: snapshot } satisfies FeedRecord));
+  return record ? `updated starter issue (${state.kind})` : "posted starter issue";
+}
+
+const rateLimited = (err: unknown) => err instanceof DiscordError && err.status === 429;
+const messageGone = (err: unknown) => err instanceof DiscordError && err.status === 404;
 
 // Keeps one message per issue in #starter-issues and edits it as the issue is
 // claimed, released or closed, so the feed always shows what's really free.
@@ -109,8 +142,7 @@ async function onIssue(e: IssuesEvent, env: Env, cfg: Config): Promise<string> {
     url: e.issue.html_url,
     labels,
   };
-  const key = `issue:${issue.repo}#${issue.number}`;
-  const record = await env.STATE.get<FeedRecord>(key, "json");
+  const record = await env.STATE.get<FeedRecord>(feedKey(issue.repo, issue.number), "json");
   const state = starterState(e.issue, cfg, e.action);
 
   if (!record) {
@@ -127,14 +159,44 @@ async function onIssue(e: IssuesEvent, env: Env, cfg: Config): Promise<string> {
     if (!starterLabelAdded && !freedUp) return "ignored issue";
     // Only announce issues that are free to take right now.
     if (state.kind !== "open" || !isStarterIssue(labels, cfg)) return "ignored issue";
-    const messageId = await sendMessage(env, env.CHANNEL_STARTER_ISSUES, starterIssueMessage(issue, state));
-    await env.STATE.put(key, JSON.stringify({ messageId, state: state.kind } satisfies FeedRecord));
-    return "posted starter issue";
   }
 
-  await editMessage(env, env.CHANNEL_STARTER_ISSUES, record.messageId, starterIssueMessage(issue, state));
-  await env.STATE.put(key, JSON.stringify({ messageId: record.messageId, state: state.kind } satisfies FeedRecord));
-  return `updated starter issue (${state.kind})`;
+  try {
+    return await writeFeed(env, record, issue, state);
+  } catch (err) {
+    // GitHub doesn't send a failed delivery again, so leave the update to the
+    // cron, which reads the issue from GitHub (see resyncStarterIssues).
+    if (!rateLimited(err)) throw err;
+    await env.STATE.put(resyncKey(issue.repo, issue.number), "1");
+    return "starter issue rate limited, resync queued";
+  }
+}
+
+/** Brings the feed messages that Discord rate limited in line with their issues on GitHub. */
+export async function resyncStarterIssues(env: Env, cfg: Config): Promise<void> {
+  const { keys } = await env.STATE.list({ prefix: "resync:", limit: RESYNC_PER_RUN });
+  for (const { name } of keys) {
+    const [, repo, number] = /^resync:(.+)#(\d+)$/.exec(name) ?? [];
+    // Removed before reading GitHub, so a mark the webhook writes meanwhile stays.
+    await env.STATE.delete(name);
+    if (!repo || !number) continue;
+    try {
+      const current = await getIssue(env, cfg, repo, Number(number));
+      const issue: StarterIssue = { repo, number: current.number, title: current.title, url: current.html_url, labels: current.labels.map((l) => l.name) };
+      const record = await env.STATE.get<FeedRecord>(feedKey(repo, current.number), "json");
+      const state = starterState(current, cfg);
+      // Like onIssue, only post issues that are free to take right now.
+      if (!record && state.kind !== "open") continue;
+      await writeFeed(env, record, issue, state);
+    } catch (err) {
+      if (rateLimited(err)) {
+        // The channel is still limited, so the rest wait as well.
+        await env.STATE.put(name, "1");
+        return;
+      }
+      console.error("starter issue resync failed", name, err);
+    }
+  }
 }
 
 async function onPullRequest(e: PullRequestEvent, env: Env, cfg: Config): Promise<string> {
@@ -153,13 +215,29 @@ async function onPullRequest(e: PullRequestEvent, env: Env, cfg: Config): Promis
       mergedAt <= p.end
   );
   if (program) {
-    await invalidateLeaderboard(env, program);
     try {
-      // GitHub's search index can lag a few seconds behind the merge, so count
-      // the author's other PRs and add this one.
+      // GitHub's search index can lag a few seconds behind the merge, so add
+      // this event's PR, and the ones merged just before it that search doesn't
+      // have yet either, before counting and caching the leaderboard.
       const login = pr.user.login.toLowerCase();
-      const others = (await searchMergedPrs(env, cfg, program)).filter(
-        (p) => p.login.toLowerCase() === login && p.url !== pr.html_url
+      const searched = await searchCountedPrs(env, cfg, program);
+      const indexed = new Set(searched.map((p) => p.url));
+      const pending = [
+        ...(await recentMerges(env, program)),
+        {
+          login: pr.user.login,
+          mergedAt: mergedAt.toISOString(),
+          url: pr.html_url,
+          title: pr.title,
+          repo: e.repository.name,
+          number: pr.number,
+        },
+      ].filter((p, i, all) => !indexed.has(p.url) && all.findIndex((q) => q.url === p.url) === i);
+      await rememberMerges(env, program, pending);
+      const prs = [...searched, ...pending];
+      await cacheLeaderboard(env, cfg, program, prs);
+      const others = prs.filter(
+        (p) => p.login.toLowerCase() === login && p.url !== pr.html_url && Date.parse(p.mergedAt) <= mergedAt.getTime()
       );
       const count = others.length + 1;
       countInWindow = {
@@ -169,7 +247,8 @@ async function onPullRequest(e: PullRequestEvent, env: Env, cfg: Config): Promis
         qualified: count === program.minPrs ? { topN: program.topN, reward: program.reward, note: program.note } : undefined,
       };
     } catch {
-      // The shoutout matters more than the count; post it without one.
+      // The shoutout matters more than the count; don't serve an old board.
+      await invalidateLeaderboard(env, program);
     }
   }
 
@@ -197,6 +276,7 @@ async function onPullRequest(e: PullRequestEvent, env: Env, cfg: Config): Promis
         url: pr.html_url,
         login: pr.user.login,
         discordId: link?.discordId,
+        linking: linkingEnabled(env),
         newRoles,
       },
       countInWindow

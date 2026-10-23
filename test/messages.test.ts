@@ -9,6 +9,7 @@ import {
   starterIssueMessage,
   starterIssuesReply,
   truncate,
+  truncateReleaseNotes,
 } from "../src/messages";
 import { makeEnv, OCTOBER } from "./helpers";
 
@@ -49,7 +50,39 @@ describe("releaseMessage", () => {
     const msg = releaseMessage("ogcops", { ...release, name: null, body: null });
     expect(msg.embeds?.[0]).toMatchObject({ title: "ogcops v0.6.2", description: "No release notes." });
     const long = releaseMessage("ogcops", { ...release, body: "x".repeat(6000) });
-    expect(long.embeds?.[0]?.description?.length).toBeLessThanOrEqual(3500);
+    expect(long.embeds?.[0]?.description?.length).toBeLessThanOrEqual(4096);
+  });
+});
+
+describe("truncateReleaseNotes", () => {
+  const url = "https://github.com/codercops/toolbelt/releases/tag/v1.0.0";
+
+  it("returns short notes completely unchanged", () => {
+    const notes = "Fixes a bug.\nSee the changelog.";
+    expect(truncateReleaseNotes(notes, url)).toBe(notes);
+  });
+
+  it("cuts long notes at the last line break and appends a link to the release", () => {
+    const line = "a".repeat(100);
+    const notes = Array.from({ length: 35 }, () => line).join("\n");
+    const result = truncateReleaseNotes(notes, url);
+    const [body] = result.split("\n[Read the full notes]");
+    expect(body?.trim().endsWith(line)).toBe(true);
+    expect(result).toContain(`[Read the full notes](${url})`);
+    expect(result.length).toBeLessThanOrEqual(4096);
+  });
+
+  it("closes an open code fence before the link", () => {
+    const notes = "```ts\n" + "const x = 1;\n".repeat(300) + "trailing\n".repeat(10);
+    const result = truncateReleaseNotes(notes, url);
+    expect(result).toMatch(/^```$/m);
+    expect(result).toContain(`[Read the full notes](${url})`);
+    expect(result.length).toBeLessThanOrEqual(4096);
+  });
+
+  it("stays within Discord's 4096-character embed description limit", () => {
+    const result = truncateReleaseNotes("word\n".repeat(1000), url);
+    expect(result.length).toBeLessThanOrEqual(4096);
   });
 });
 
@@ -80,6 +113,13 @@ describe("mergedPrMessage", () => {
     expect(text).not.toContain("That's their");
   });
 
+  it("says role for one new role and roles for several", () => {
+    const one = mergedPrMessage({ ...pr, newRoles: ["Contributor"] }).embeds?.[0]?.description ?? "";
+    expect(one).toContain("That earns them the **Contributor** role.");
+    const two = mergedPrMessage({ ...pr, newRoles: ["Contributor", "Top Contributor"] }).embeds?.[0]?.description ?? "";
+    expect(two).toContain("That earns them the **Contributor** and **Top Contributor** roles.");
+  });
+
   it("adds the running count when it's known", () => {
     const text = mergedPrMessage(pr, { count: 3, label: "Hacktoberfest 2026" }).embeds?.[0]?.description ?? "";
     expect(text).toContain("That's their 3rd merged PR on the Hacktoberfest 2026 leaderboard.");
@@ -97,10 +137,51 @@ describe("mergedPrMessage", () => {
     const plain = mergedPrMessage(pr, { count: 5, label: "Hacktoberfest 2026", qualified: { ...qualified, note: undefined } }).embeds?.[0]?.description ?? "";
     expect(plain.endsWith("which goes to the top 5 when the program ends.")).toBe(true);
   });
+
+  describe("asking unlinked authors to run /link", () => {
+    const newHere = "New here? Run `/link` in this server to connect your GitHub account and get the Contributor role.";
+    const winnersDm = "Winners are contacted by Discord DM, so run `/link` in this server to tell us which Discord account is yours.";
+    const qualified = { topN: 5, reward: "a CODERCOPS T-shirt and stickers" };
+    const lines = (...args: Parameters<typeof mergedPrMessage>) => (mergedPrMessage(...args).embeds?.[0]?.description ?? "").split("\n");
+
+    it("adds the welcome line on their first counted PR", () => {
+      expect(lines({ ...pr, linking: true }, { count: 1, label: "Hacktoberfest 2026" })).toEqual([
+        expect.stringContaining("got a PR merged in **chatcops**"),
+        "That's their 1st merged PR on the Hacktoberfest 2026 leaderboard.",
+        newHere,
+      ]);
+    });
+
+    it("adds the DM line after the qualify line on the merge that reaches the minimum", () => {
+      expect(lines({ ...pr, linking: true }, { count: 5, label: "Hacktoberfest 2026", qualified })).toEqual([
+        expect.stringContaining("got a PR merged in **chatcops**"),
+        "That's their 5th merged PR on the Hacktoberfest 2026 leaderboard.",
+        "With 5 they now qualify for a CODERCOPS T-shirt and stickers, which goes to the top 5 when the program ends.",
+        winnersDm,
+      ]);
+    });
+
+    it("uses only the DM line when the first counted PR is also the one that qualifies", () => {
+      const text = lines({ ...pr, linking: true }, { count: 1, label: "Hacktoberfest 2026", qualified: { ...qualified, topN: 3 } });
+      expect(text.at(-1)).toBe(winnersDm);
+      expect(text).not.toContain(newHere);
+    });
+
+    it("adds nothing for linked authors, other counts, PRs that don't count, or with linking off", () => {
+      const noLink = (text: string[]) => expect(text.some((l) => l.includes("/link"))).toBe(false);
+      noLink(lines({ ...pr, linking: true, discordId: "42" }, { count: 1, label: "Hacktoberfest 2026" }));
+      noLink(lines({ ...pr, linking: true, discordId: "42" }, { count: 5, label: "Hacktoberfest 2026", qualified }));
+      noLink(lines({ ...pr, linking: true }, { count: 2, label: "Hacktoberfest 2026" }));
+      noLink(lines({ ...pr, linking: true }, { count: 6, label: "Hacktoberfest 2026" }));
+      noLink(lines({ ...pr, linking: true }));
+      noLink(lines({ ...pr, linking: false }, { count: 1, label: "Hacktoberfest 2026" }));
+      noLink(lines(pr, { count: 5, label: "Hacktoberfest 2026", qualified }));
+    });
+  });
 });
 
 describe("leaderboardMessage", () => {
-  const row = (login: string, count: number, qualifies = false, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", qualifies, winner });
+  const row = (login: string, count: number, qualifies = false, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", prs:[], qualifies, winner });
   const board = { generatedAt: "2026-10-12T04:30:00.000Z", rows: [row("ada", 6, true, true), row("bob", 2), row("cy", 1)] };
 
   const program = cfg.programs[0]!;
@@ -179,7 +260,9 @@ describe("starterIssuesReply", () => {
     expect(reply.embeds).toHaveLength(2);
     expect(reply.embeds?.[0]?.title).toBe("toolbelt: 2 open starter issues");
     expect(reply.embeds?.[0]?.description).toContain("[#2](https://github.com/codercops/toolbelt/issues/2) Issue 2");
-    expect(decodeURIComponent(reply.embeds?.[0]?.url ?? "")).toContain('no:assignee label:"good first issue","help wanted"');
+    expect(decodeURIComponent(reply.embeds?.[0]?.url ?? "")).toContain("-label:blocked");
+    expect(decodeURIComponent(reply.embeds?.[0]?.url ?? "")).toContain("no:assignee");
+    expect(decodeURIComponent(reply.embeds?.[0]?.url ?? "")).toContain('label:"good first issue","help wanted"');
     expect(reply.embeds?.[1]?.description).toContain("Nothing unassigned right now");
   });
 
@@ -188,7 +271,9 @@ describe("starterIssuesReply", () => {
     const embed = starterIssuesReply(cfg, [{ repo: "toolbelt", issues }], ["help wanted"]).embeds?.[0];
     const links = [embed?.url, embed?.description?.match(/\[and \d+ more\]\(([^)]+)\)/)?.[1]].map((u) => decodeURIComponent(u ?? ""));
     for (const link of links) {
-      expect(link).toContain('no:assignee label:"help wanted"');
+      expect(link).toContain("-label:blocked");
+      expect(link).toContain("no:assignee");
+      expect(link).toContain('label:"help wanted"');
       expect(link).not.toContain("good first issue");
     }
   });

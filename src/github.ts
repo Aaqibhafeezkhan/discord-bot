@@ -51,6 +51,21 @@ export interface StarterIssue {
   labels: string[];
 }
 
+export interface GithubIssue {
+  number: number;
+  title: string;
+  html_url: string;
+  state: "open" | "closed";
+  state_reason?: string | null;
+  labels: { name: string }[];
+  assignees: { login: string }[];
+  pull_request?: unknown;
+}
+
+export async function getIssue(env: Env, cfg: Config, repo: string, number: number): Promise<GithubIssue> {
+  return gh<GithubIssue>(env, `/repos/${cfg.org}/${repo}/issues/${number}`);
+}
+
 interface ApiIssue {
   number: number;
   title: string;
@@ -90,7 +105,9 @@ export async function listStarterIssues(
 
 interface SearchResult {
   total_count: number;
-  items: { html_url: string; user: { login: string } | null; pull_request?: { merged_at: string | null } }[];
+  /** Set when GitHub's search timed out, so `items` is only part of the answer, sometimes none of it. */
+  incomplete_results?: boolean;
+  items: { html_url: string; number: number; title: string; repository_url: string; user: { login: string } | null; pull_request?: { merged_at: string | null } }[];
 }
 
 /** Every merged PR that counts for a program: labeled, in its repos, merged inside its window. */
@@ -110,9 +127,11 @@ export async function searchMergedPrs(env: Env, cfg: Config, program: Program): 
   for (let page = 1; page <= 10; page++) {
     const query = new URLSearchParams({ q, per_page: "100", page: String(page), sort: "created", order: "asc" });
     const result = await gh<SearchResult>(env, `/search/issues?${query}`);
+    if (result.incomplete_results) throw new GithubError(503, "GitHub search returned incomplete results");
     for (const item of result.items) {
       const mergedAt = item.pull_request?.merged_at;
-      if (item.user && mergedAt) prs.push({ login: item.user.login, mergedAt, url: item.html_url });
+      const repo = item.repository_url.split("/").pop();
+      if (item.user && mergedAt && repo) prs.push({ login: item.user.login, mergedAt, url: item.html_url, title: item.title, repo, number: item.number });
     }
     if (result.items.length < 100) break;
   }
@@ -128,6 +147,7 @@ export async function countMergedPrs(env: Env, cfg: Config, login: string, excep
   const q = ["is:pr", "is:merged", `author:${login}`, ...cfg.repos.map((r) => `repo:${cfg.org}/${r}`)].join(" ");
   const query = new URLSearchParams({ q, per_page: "100" });
   const result = await gh<SearchResult>(env, `/search/issues?${query}`);
+  if (result.incomplete_results) throw new GithubError(503, "GitHub search returned incomplete results");
   const listed = exceptUrl !== undefined && result.items.some((item) => item.html_url === exceptUrl);
   return result.total_count - (listed ? 1 : 0);
 }

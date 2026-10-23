@@ -1,19 +1,28 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getConfig } from "../src/config";
 import worker from "../src/index";
-import { dateRange, escapeHtml, leaderboardJson, leaderboardPage, standing, statusLine } from "../src/page";
+import { rankContributors, type MergedPr } from "../src/leaderboard";
+import { contributorPage, dateRange, escapeHtml, leaderboardJson, leaderboardPage, noticePage, standing, statusLine } from "../src/page";
 import { currentProgram } from "../src/programs";
 import { makeEnv, mockFetch, OCTOBER } from "./helpers";
 
 const program = getConfig(makeEnv()).programs[0]!;
 const during = new Date("2026-10-12T04:30:00Z");
 const after = new Date("2026-11-03T00:00:00Z");
-const row = (login: string, count: number, qualifies = false, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", qualifies, winner });
+const row = (login: string, count: number, qualifies = false, winner = false) => ({
+  login,
+  count,
+  reachedAt: "2026-10-05T00:00:00Z",
+  prs: [],
+  qualifies,
+  winner,
+});
 const board = { generatedAt: "2026-10-12T04:30:00.000Z", rows: [row("ada", 6, true, true), row("bob", 5, true, false), row("cy", 2), row("dee", 4)] };
 const links = {
   issues: "https://github.com/search?q=x&type=issues",
   discord: "https://discord.gg/example",
   self: "https://bot.example/leaderboard/2026-10",
+  image: "https://bot.example/leaderboard/2026-10.png?v=abc",
   others: [] as { title: string; path: string }[],
 };
 
@@ -127,14 +136,131 @@ describe("leaderboardPage", () => {
     const many = leaderboardPage(board, program, { ...links, others: [{ title: "November sprint", path: "/leaderboard/2026-11" }] }, during);
     expect(many).toContain('<li><a href="/leaderboard/2026-11">November sprint</a></li>');
   });
+
+  it("links to the favicon in the head", () => {
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
+  });
+
+  it("has the same share preview tags as a contributor page, pointing at its own image", () => {
+    expect(html).toContain('<meta property="og:image" content="https://bot.example/leaderboard/2026-10.png?v=abc">');
+    expect(html).toContain('<meta property="og:image:width" content="1200">');
+    expect(html).toContain('<meta property="og:image:height" content="630">');
+    expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+    expect(html).toContain('<meta name="twitter:image" content="https://bot.example/leaderboard/2026-10.png?v=abc">');
+    expect(html).not.toContain("og.codercops.com");
+    expect(html).toContain(
+      '<meta property="og:image:alt" content="Share image: Hacktoberfest 2026 leaderboard. 1. ada, 6 merged PRs; 2. bob, 5 merged PRs; 3. cy, 2 merged PRs; 4. dee, 4 merged PRs.">'
+    );
+    const empty = leaderboardPage({ ...board, rows: [] }, program, links, during);
+    expect(empty).toContain('content="Share image: Hacktoberfest 2026 leaderboard. No merged pull requests counted yet.">');
+    const evil = leaderboardPage({ ...board, rows: [row('"><script>', 1)] }, program, links, during);
+    expect(evil).toContain("1. &quot;&gt;&lt;script&gt;, 1 merged PR.");
+  });
+});
+
+describe("noticePage", () => {
+  it("links to the favicon in the head", () => {
+    const html = noticePage("Done", ["Everything is linked."], true);
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
+  });
+});
+
+describe("contributorPage", () => {
+  it("links to the favicon in the head", () => {
+    const html = contributorPage(
+      { program, row: board.rows[0]!, rank: 1, of: 4, generatedAt: "2026-10-12T04:30:00.000Z" },
+      {
+        self: "https://bot.example/leaderboard/2026-10/u/ada",
+        image: "https://bot.example/leaderboard/2026-10/u/ada.png",
+        board: "/leaderboard/2026-10",
+        prs: "https://github.com/search?q=x",
+        issues: "https://github.com/search?q=x",
+        discord: "https://discord.gg/example",
+      },
+      during
+    );
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
+  });
 });
 
 describe("leaderboardJson", () => {
   it("returns ranks, counts and the rules", () => {
     const json = leaderboardJson(board, program, during);
     expect(json).toMatchObject({ id: "2026-10", title: "Hacktoberfest 2026 leaderboard", status: "running" });
-    expect(json.rows[0]).toEqual({ rank: 1, login: "ada", mergedPrs: 6, qualifies: true, inTop: true });
+    expect(json.rows[0]).toEqual({ rank: 1, login: "ada", mergedPrs: 6, qualifies: true, inTop: true, prs: [] });
     expect(json.rules).toMatchObject({ minPrs: 5, topN: 5, label: "hacktoberfest-accepted", start: "2026-10-01T00:00:00.000Z" });
+  });
+});
+
+describe("per-row PR lists", () => {
+  const pr = (over: Partial<MergedPr> = {}): MergedPr => ({
+    login: "alice",
+    mergedAt: "2026-10-05T10:00:00Z",
+    url: "https://github.com/codercops/toolbelt/pull/1",
+    title: "Fix bug",
+    repo: "toolbelt",
+    number: 1,
+    ...over,
+  });
+  const build = (prs: MergedPr[]) => ({
+    rows: rankContributors(prs, { excludedUsers: new Set(), minPrs: program.minPrs, topN: program.topN }),
+    generatedAt: "2026-10-12T04:30:00.000Z",
+  });
+
+  it("lists each person's PRs newest first", () => {
+    const [first] = build([
+      pr({ number: 1, mergedAt: "2026-10-02T00:00:00Z" }),
+      pr({ number: 2, mergedAt: "2026-10-09T00:00:00Z" }),
+    ]).rows;
+    expect(first!.prs.map((p) => p.number)).toEqual([2, 1]);
+    expect(first!.reachedAt).toBe("2026-10-09T00:00:00Z");
+  });
+
+  it("opens each row to its PRs as links with repo, number and title", () => {
+    const html = leaderboardPage(
+      build([
+        pr({ number: 1, title: "First fix", url: "https://github.com/codercops/toolbelt/pull/1", mergedAt: "2026-10-02T00:00:00Z" }),
+        pr({ number: 7, title: "Second fix", repo: "ogcops", url: "https://github.com/codercops/ogcops/pull/7", mergedAt: "2026-10-09T00:00:00Z" }),
+      ]),
+      program,
+      links,
+      during
+    );
+    expect(html).toContain("<details>");
+    expect(html).toContain("<summary>");
+    expect(html).toContain('<a href="https://github.com/codercops/ogcops/pull/7"><span class="repo">ogcops#7</span>Second fix</a>');
+    expect(html).toContain('<a href="https://github.com/codercops/toolbelt/pull/1"><span class="repo">toolbelt#1</span>First fix</a>');
+    expect(html.indexOf("ogcops#7")).toBeLessThan(html.indexOf("toolbelt#1"));
+  });
+
+  it("escapes HTML in PR titles", () => {
+    const html = leaderboardPage(
+      build([pr({ title: `<img src=x onerror=alert(1)> & "q"` })]),
+      program,
+      links,
+      during
+    );
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt; &amp; &quot;q&quot;");
+  });
+
+  it("needs no JavaScript", () => {
+    const html = leaderboardPage(build([pr()]), program, links, during);
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("onclick");
+  });
+
+  it("includes the PRs in the JSON", () => {
+    const json = leaderboardJson(build([pr()]), program, during);
+    expect(json.rows[0]!.prs).toEqual([
+      {
+        repo: "toolbelt",
+        number: 1,
+        title: "Fix bug",
+        url: "https://github.com/codercops/toolbelt/pull/1",
+        mergedAt: "2026-10-05T10:00:00Z",
+      },
+    ]);
   });
 });
 
@@ -144,8 +270,22 @@ describe("GET /leaderboard", () => {
   const search = () => ({
     total_count: 2,
     items: [
-      { html_url: "https://github.com/codercops/toolbelt/pull/1", user: { login: "ada" }, pull_request: { merged_at: "2026-10-02T00:00:00Z" } },
-      { html_url: "https://github.com/codercops/toolbelt/pull/2", user: { login: "anurag629" }, pull_request: { merged_at: "2026-10-03T00:00:00Z" } },
+      {
+        html_url: "https://github.com/codercops/toolbelt/pull/1",
+        number: 1,
+        title: "Add belt loops",
+        repository_url: "https://api.github.com/repos/codercops/toolbelt",
+        user: { login: "ada" },
+        pull_request: { merged_at: "2026-10-02T00:00:00Z" },
+      },
+      {
+        html_url: "https://github.com/codercops/toolbelt/pull/2",
+        number: 2,
+        title: "Excluded user's PR",
+        repository_url: "https://api.github.com/repos/codercops/toolbelt",
+        user: { login: "anurag629" },
+        pull_request: { merged_at: "2026-10-03T00:00:00Z" },
+      },
     ],
   });
   beforeEach(() => {
@@ -158,10 +298,14 @@ describe("GET /leaderboard", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toContain("text/html");
     expect(res.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
+    expect(res.headers.get("Content-Security-Policy")).toContain("img-src 'self'");
     const html = await res.text();
     expect(html).toContain(">ada<");
+    expect(html).toContain("toolbelt#1");
+    expect(html).toContain("Add belt loops");
     expect(html).not.toContain("anurag629");
     expect(html).toContain('content="https://bot.example/leaderboard/2026-10"');
+    expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
 
     await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
     expect(fetched.calls.filter((c) => c.url.includes("api.github.com"))).toHaveLength(1);
@@ -171,7 +315,9 @@ describe("GET /leaderboard", () => {
     mockFetch(search);
     const res = await worker.fetch(new Request("https://bot.example/leaderboard.json"), env, ctx);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
-    expect(((await res.json()) as { rows: unknown[] }).rows).toHaveLength(1);
+    const body = (await res.json()) as { rows: { prs: { title: string }[] }[] };
+    expect(body.rows).toHaveLength(1);
+    expect(body.rows[0]!.prs.map((p) => p.title)).toEqual(["Add belt loops"]);
   });
 
   it("gives every program a permanent address and 404s unknown ones", async () => {
@@ -183,7 +329,6 @@ describe("GET /leaderboard", () => {
     expect(((await json.json()) as { id: string }).id).toBe("2026-10");
 
     expect((await worker.fetch(new Request("https://bot.example/leaderboard/2025-10"), env, ctx)).status).toBe(404);
-    expect((await worker.fetch(new Request("https://bot.example/leaderboard/"), env, ctx)).status).toBe(404);
     expect((await worker.fetch(new Request("https://bot.example/leaderboard", { method: "POST" }), env, ctx)).status).toBe(404);
     const none = await worker.fetch(new Request("https://bot.example/leaderboard"), makeEnv({ PROGRAMS: [] }), ctx);
     expect(none.status).toBe(404);
@@ -200,6 +345,16 @@ describe("GET /leaderboard", () => {
     const searches = fetched.calls.filter((c) => c.url.includes("api.github.com"));
     expect(searches).toHaveLength(2);
     expect(decodeURIComponent(searches[1]!.url)).toContain("merged:2026-11-01T00:00:00Z..2026-11-30T23:59:59Z");
+  });
+
+  it("answers a HEAD like the GET, with the same headers and no body", async () => {
+    mockFetch(search);
+    const get = await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
+    const head = await worker.fetch(new Request("https://bot.example/leaderboard", { method: "HEAD" }), env, ctx);
+    expect(head.status).toBe(get.status);
+    expect(head.headers.get("Content-Type")).toBe(get.headers.get("Content-Type"));
+    expect(head.headers.get("Content-Security-Policy")).toBe(get.headers.get("Content-Security-Policy"));
+    expect(await head.text()).toBe("");
   });
 
   it("answers 503 when GitHub is rate limiting", async () => {

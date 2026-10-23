@@ -42,6 +42,9 @@ const search = (count: number) => () => ({
   total_count: count,
   items: Array.from({ length: count }, (_, i) => ({
     html_url: `https://github.com/codercops/toolbelt/pull/${i + 1}`,
+    number: 1, 
+    title: "Fix a thing", 
+    repository_url: "https://api.github.com/repos/codercops/toolbelt",
     user: { login: "Ada" },
     pull_request: { merged_at: `2026-10-0${i + 1}T00:00:00Z` },
   })),
@@ -157,6 +160,18 @@ describe("GET /link/callback", () => {
     ]);
   });
 
+  it("says roles when linking earns more than one role", async () => {
+    const fetched = mockFetch(search(5), discordApi());
+    const res = await callback({ code: "the-code", state: await validState() });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("you now have the Contributor and Top Contributor roles.");
+    expect(fetched.calls.filter((c) => c.url.includes("/roles/")).map((c) => new URL(c.url).pathname)).toEqual([
+      "/api/v10/guilds/guild-1/members/42/roles/role-contributor",
+      "/api/v10/guilds/guild-1/members/42/roles/role-top",
+    ]);
+  });
+
   it("tells people without a verified GitHub connection how to add one, and stores nothing", async () => {
     for (const connections of [[], [{ type: "github", id: "1", name: "Ada", verified: false }], [{ type: "twitch", id: "1", name: "Ada", verified: true }], [{ type: "github", id: "1", name: "not a login!", verified: true }]]) {
       const fetched = mockFetch(search(0), discordApi({ connections }));
@@ -192,7 +207,10 @@ describe("GET /link/callback", () => {
   it("handles a cancelled request, a rejected code and linking being off", async () => {
     const fetched = mockFetch(search(0), discordApi({ tokenStatus: 400 }));
     const cancelled = await callback({ error: "access_denied", state: await validState() });
-    expect(await cancelled.text()).toContain("Nothing was linked");
+    expect(cancelled.headers.get("Content-Security-Policy")).toContain("img-src 'self'");
+    const cancelledHtml = await cancelled.text();
+    expect(cancelledHtml).toContain("Nothing was linked");
+    expect(cancelledHtml).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
     expect(fetched.calls).toHaveLength(0);
 
     const rejected = await callback({ code: "used-twice", state: await validState() });
@@ -225,6 +243,27 @@ describe("GET /link/callback", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("your first one earns you the Contributor role");
     expect((await getLink(env, "42"))?.githubLogin).toBe("Ada");
+  });
+
+  it("tells someone who already has the role about their merged PRs instead of promising the role", async () => {
+    const fetched = mockFetch(search(3), discordApi({ memberRoles: ["role-contributor"] }));
+    const res = await callback({ code: "c", state: await validState() });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("You already have 3 merged pull requests with us.");
+    expect(html).not.toContain("your first one earns you the Contributor role");
+    expect(fetched.calls.some((c) => c.url.includes("/roles/"))).toBe(false);
+
+    mockFetch(search(1), discordApi({ memberRoles: ["role-contributor"] }));
+    const single = await (await callback({ code: "c", state: await validState() })).text();
+    expect(single).toContain("You already have 1 merged pull request with us.");
+  });
+
+  it("tells someone with no merged PRs that their first one earns the role", async () => {
+    mockFetch(search(0), discordApi());
+    const res = await callback({ code: "c", state: await validState() });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("your first one earns you the Contributor role");
   });
 
   it("escapes names that come from Discord", async () => {
@@ -321,6 +360,13 @@ describe("/link, /unlink and /me", () => {
     expect(decodeURIComponent(lifetime!.url).replace(/\+/g, " ")).toContain("is:pr is:merged author:Ada repo:codercops/chatcops repo:codercops/ogcops repo:codercops/toolbelt");
   });
 
+  it("/me says roles when it grants more than one", async () => {
+    await saveLink(env, ada);
+    mockFetch(search(5), discordApi({ memberRoles: [] }));
+    const reply = await run("me");
+    expect(reply.content).toContain("You now have the **Contributor** and **Top Contributor** roles.");
+  });
+
   it("/me tells a maintainer why they have no standing and no roles", async () => {
     await saveLink(env, { ...ada, githubLogin: "anurag629" });
     const fetched = mockFetch(search(40), discordApi({ memberRoles: [] }));
@@ -345,7 +391,7 @@ describe("/link, /unlink and /me", () => {
 
     await saveLink(env, ada);
     mockFetch(search(6), discordApi({ memberRoles: ["role-contributor", "role-top"] }));
-    await env.STATE.delete("leaderboard:v2:2026-10");
+    await env.STATE.delete("leaderboard:v3:2026-10");
     expect((await run("me")).content).toContain("6 merged PRs, 1st of 1. You're in the top 5 right now.");
 
     const later = await runCommand({ name: "me" }, user, env, cfg, new Date("2026-11-05T00:00:00Z"));
@@ -399,6 +445,7 @@ describe("linked members in posts", () => {
       number: 9,
       title: "Fix a thing",
       html_url: "https://github.com/codercops/toolbelt/pull/9",
+      repository_url: "https://api.github.com/repos/codercops/toolbelt",
       merged: true,
       merged_at: "2026-10-05T12:00:00Z",
       user: { login: "Ada", type: "User" },
@@ -427,8 +474,8 @@ describe("linked members in posts", () => {
     // Five in the index, the new one among them (pull/5 here is #9's stand-in).
     const github = () => ({
       total_count: 5,
-      items: [1, 2, 3, 4].map((n) => ({ html_url: `https://github.com/codercops/toolbelt/pull/${n}`, user: { login: "Ada" }, pull_request: { merged_at: "2026-10-01T00:00:00Z" } })).concat([
-        { html_url: "https://github.com/codercops/toolbelt/pull/9", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-05T12:00:00Z" } },
+      items: [1, 2, 3, 4].map((n) => ({ html_url: `https://github.com/codercops/toolbelt/pull/${n}`, number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-01T00:00:00Z" } })).concat([
+        { html_url: "https://github.com/codercops/toolbelt/pull/9", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "Ada" }, pull_request: { merged_at: "2026-10-05T12:00:00Z" } },
       ]),
     });
     const fetched = mockFetch(github, discordApi({ memberRoles: ["role-contributor"] }));
@@ -436,6 +483,16 @@ describe("linked members in posts", () => {
     const post = fetched.calls.find((c) => c.url.endsWith("/channels/chan-merged/messages"));
     expect(post?.body.embeds[0].description).toContain("That's their 5th merged PR");
     expect(post?.body.embeds[0].description).toContain("That earns them the **Top Contributor** role.");
+  });
+
+  it("doesn't ask a linked author to run /link", async () => {
+    const env = makeEnv({ LINKING: "on", DISCORD_CLIENT_SECRET: "client-secret" });
+    await saveLink(env, ada);
+    const fetched = mockFetch(search(0), discordApi({ memberRoles: [] }));
+    await handleGithubEvent("pull_request", prEvent, env, getConfig(env));
+    const post = fetched.calls.find((c) => c.url.endsWith("/channels/chan-merged/messages"));
+    expect(post?.body.embeds[0].description).toContain("That's their 1st merged PR");
+    expect(post?.body.embeds[0].description).not.toContain("/link");
   });
 
   it("still posts the shoutout when the role can't be given", async () => {
@@ -452,13 +509,13 @@ describe("linked members in posts", () => {
     const text = mergedPrMessage({ repo: "toolbelt", number: 9, title: "Fix", url: "https://x/9", login: "bob", newRoles: [] }).embeds?.[0]?.description;
     expect(text).toBe("**bob** got a PR merged in **toolbelt**: [Fix](https://x/9)");
     expect(mergedPrMessage({ repo: "t", number: 1, title: "x", url: "https://x/1", login: "ada", discordId: "42", newRoles: ["Contributor", "Top Contributor"] }).embeds?.[0]?.description).toContain(
-      "That earns them the **Contributor** and **Top Contributor** role."
+      "That earns them the **Contributor** and **Top Contributor** roles."
     );
   });
 
   it("puts Discord names next to linked people on the leaderboard", () => {
     const program = getConfig(makeEnv()).programs[0]!;
-    const row = (login: string, count: number, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", qualifies: winner, winner });
+    const row = (login: string, count: number, winner = false) => ({ login, count, reachedAt: "2026-10-05T00:00:00Z", prs:[], qualifies: winner, winner });
     const board = { generatedAt: now.toISOString(), rows: [row("Ada", 6, true), row("bob", 2)] };
     const embed = leaderboardMessage(board, program, { final: true, members: new Map([["ada", "42"]]) }).embeds?.[0];
     expect(embed?.description).toContain("1. **Ada** (<@42>) · 6 merged PRs · winner\n2. **bob** · 2 merged PRs");

@@ -107,8 +107,16 @@ describe("searchMergedPrs", () => {
   }
 
   function prItem(login: string, mergedAt: string, url: string) {
-    return { html_url: url, user: { login }, pull_request: { merged_at: mergedAt } };
+    return { html_url: url, number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login }, pull_request: { merged_at: mergedAt } };
   }
+
+  it("throws when GitHub says the search results are incomplete", async () => {
+    const env = makeEnv();
+    const cfg = getConfig(env);
+    const program = { ...baseProgram, repos: cfg.repos };
+    github(() => json({ total_count: 0, incomplete_results: true, items: [] }));
+    await expect(searchMergedPrs(env, cfg, program)).rejects.toThrow("incomplete results");
+  });
 
   it("stops after a page that has fewer than 100 items", async () => {
     const env = makeEnv();
@@ -164,7 +172,7 @@ describe("searchMergedPrs", () => {
     const cfg = getConfig(env);
     const program = { ...baseProgram, repos: cfg.repos };
     const items = [
-      { html_url: "https://github.com/codercops/chatcops/pull/1", user: null, pull_request: { merged_at: "2026-10-02T10:00:00Z" } },
+      { html_url: "https://github.com/codercops/chatcops/pull/1",  number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: null, pull_request: { merged_at: "2026-10-02T10:00:00Z" } },
       prItem("ada", "2026-10-03T10:00:00Z", "https://github.com/codercops/chatcops/pull/2"),
     ];
     github(() => json(makePage(items)));
@@ -178,7 +186,7 @@ describe("searchMergedPrs", () => {
     const cfg = getConfig(env);
     const program = { ...baseProgram, repos: cfg.repos };
     const items = [
-      { html_url: "https://github.com/codercops/chatcops/pull/1", user: { login: "ghost" }, pull_request: { merged_at: null } },
+      { html_url: "https://github.com/codercops/chatcops/pull/1", number: 1, title: "Fix a thing", repository_url: "https://api.github.com/repos/codercops/toolbelt", user: { login: "ghost" }, pull_request: { merged_at: null } },
       prItem("bob", "2026-10-04T10:00:00Z", "https://github.com/codercops/chatcops/pull/2"),
     ];
     github(() => json(makePage(items)));
@@ -260,5 +268,13 @@ describe("searchMergedPrs", () => {
     const err = await searchMergedPrs(env, cfg, program).catch((e) => e);
     expect(err).toBeInstanceOf(GithubError);
     expect(err.status).toBe(503);
+  });
+});
+
+describe("countMergedPrs with incomplete results", () => {
+  it("throws instead of reporting a count that is too low", async () => {
+    const env = makeEnv();
+    github(() => json({ total_count: 0, incomplete_results: true, items: [] }));
+    await expect(countMergedPrs(env, getConfig(env), "ada")).rejects.toThrow("incomplete results");
   });
 });

@@ -2,6 +2,7 @@
 // JSON from the same ranking the Discord posts use.
 import type { Program } from "./config";
 import type { Leaderboard, LeaderboardRow } from "./leaderboard";
+import { BOARD_ROWS } from "./card";
 import { programStatus, type ProgramStatus } from "./programs";
 
 export function escapeHtml(text: string): string {
@@ -52,9 +53,23 @@ export function leaderboardJson(board: Leaderboard, program: Program, now: Date)
       mergedPrs: row.count,
       qualifies: row.qualifies,
       inTop: row.winner,
+      prs: row.prs.map(({ repo, number, title, url, mergedAt }) => ({ repo, number, title, url, mergedAt })),
     })),
   };
 }
+
+export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <circle cx="16" cy="3" r="2" fill="#00e5c7" stroke="#0a0b0f" stroke-width="1.2"/>
+  <line x1="16" y1="5" x2="16" y2="8" stroke="#0a0b0f" stroke-width="1.2"/>
+  <rect x="1.5" y="14" width="3.5" height="7" rx="1.75" fill="#00e5c7" stroke="#0a0b0f" stroke-width="1.2"/>
+  <rect x="27" y="14" width="3.5" height="7" rx="1.75" fill="#00e5c7" stroke="#0a0b0f" stroke-width="1.2"/>
+  <rect x="5" y="8" width="22" height="20" rx="8" fill="#ffffff" stroke="#0a0b0f" stroke-width="1.5"/>
+  <rect x="8" y="12.5" width="16" height="8" rx="4" fill="#0a0b0f"/>
+  <ellipse cx="12.5" cy="16.5" rx="1.6" ry="2" fill="#00e5c7"/>
+  <ellipse cx="19.5" cy="16.5" rx="1.6" ry="2" fill="#00e5c7"/>
+  <path d="M12.5 23.5 Q16 26 19.5 23.5" fill="none" stroke="#0a0b0f" stroke-width="1.4" stroke-linecap="round"/>
+</svg>
+`;
 
 const STYLE = `
 :root{--bg:#0a0b0f;--raise:#12141a;--line:#1e222b;--fg:#e6e9ef;--muted:#8a93a8;--cyan:#00e5c7;--violet:#9e7bff;--gold:#d4a72c}
@@ -67,8 +82,17 @@ a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}
 h1{font:700 clamp(28px,6vw,40px)/1.15 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0 0 12px}
 .lede{color:var(--muted);margin:0 0 32px}
 .board{list-style:none;margin:0 0 32px;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--raise);overflow:hidden}
-.board li{display:flex;align-items:center;gap:12px;padding:12px 16px;border-top:1px solid var(--line)}
-.board li:first-child{border-top:0}
+.board>li{border-top:1px solid var(--line)}
+.board>li:first-child{border-top:0}
+.board summary{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;list-style:none}
+.board summary::-webkit-details-marker{display:none}
+.board summary::before{content:"";width:7px;height:7px;flex:none;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s}
+.board details[open]>summary::before{transform:rotate(45deg)}
+.board summary:hover{background:var(--bg)}
+.prs{list-style:none;margin:0;padding:4px 16px 14px 56px;display:grid;gap:8px}
+.prs li{font-size:14px;line-height:1.4}
+.prs a{color:var(--fg)}
+.prs .repo{font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);margin-right:8px}
 .rank{width:28px;font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted)}
 .board img{width:36px;height:36px;border-radius:50%;background:var(--line)}
 .who{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -117,6 +141,8 @@ export interface PageLinks {
   discord: string;
   /** The page's own permanent URL, for share previews. */
   self: string;
+  /** The board's share image, as an absolute URL. It carries a version so previews refresh when the top five change. */
+  image: string;
   /** The other programs, each with the path of its page. */
   others: { title: string; path: string }[];
 }
@@ -135,11 +161,13 @@ export function leaderboardPage(
   const when = dateRange(start, end);
   const state = statusLine(program, now);
   const description = `Merged pull requests in ${repos}, ${when}. The top ${topN} with at least ${minPrs} get ${reward}.`;
-  const ogImage = `https://og.codercops.com/api/og?${new URLSearchParams({
-    template: "github-readme-hero",
-    title: heading,
-    description: `Top contributors to ${repos}`,
-  })}`;
+  const top = board.rows
+    .slice(0, BOARD_ROWS)
+    .map((row, i) => `${i + 1}. ${row.login}, ${row.count} merged ${row.count === 1 ? "PR" : "PRs"}`)
+    .join("; ");
+  const imageAlt = board.rows.length
+    ? `Share image: ${heading}. ${top}.`
+    : `Share image: ${heading}. No merged pull requests counted yet.`;
 
   const rows = board.rows
     .map((row, i) => {
@@ -147,7 +175,13 @@ export function leaderboardPage(
       const chip = standing(row, program, state.status);
       const chipHtml = chip ? `<span class="chip ${chip.kind}">${escapeHtml(chip.text)}</span>` : "";
       const card = `<a class="cardlink" href="/leaderboard/${escapeHtml(program.id)}/u/${encodeURIComponent(row.login)}" title="${login}'s share card">Card</a>`;
-      return `<li><span class="rank">${i + 1}</span><img src="https://github.com/${encodeURIComponent(row.login)}.png?size=72" alt="" width="36" height="36" loading="lazy"><span class="who"><a href="https://github.com/${encodeURIComponent(row.login)}">${login}</a></span><span class="count">${row.count} merged ${row.count === 1 ? "PR" : "PRs"}</span>${chipHtml}${card}</li>`;
+      const prList = row.prs
+        .map(
+          (pr) =>
+            `<li><a href="${escapeHtml(pr.url)}"><span class="repo">${escapeHtml(pr.repo)}#${pr.number}</span>${escapeHtml(pr.title)}</a></li>`
+        )
+        .join("\n");
+      return `<li><details><summary><span class="rank">${i + 1}</span><img src="https://github.com/${encodeURIComponent(row.login)}.png?size=72" alt="" width="36" height="36" loading="lazy"><span class="who"><a href="https://github.com/${encodeURIComponent(row.login)}">${login}</a></span><span class="count">${row.count} merged ${row.count === 1 ? "PR" : "PRs"}</span>${chipHtml}${card}</summary>\n<ul class="prs">\n${prList}\n</ul></details></li>`;
     })
     .join("\n");
 
@@ -160,10 +194,15 @@ export function leaderboardPage(
 <meta name="description" content="${escapeHtml(description)}">
 <meta property="og:title" content="${escapeHtml(heading)}">
 <meta property="og:description" content="${escapeHtml(description)}">
-<meta property="og:image" content="${escapeHtml(ogImage)}">
+<meta property="og:image" content="${escapeHtml(links.image)}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="${escapeHtml(imageAlt)}">
 <meta property="og:url" content="${escapeHtml(links.self)}">
 <link rel="canonical" href="${escapeHtml(links.self)}">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="${escapeHtml(links.image)}">
 <style>${STYLE}</style>
 </head>
 <body>
@@ -201,6 +240,7 @@ export function noticePage(title: string, lines: string[], ok: boolean, label = 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${escapeHtml(title)}</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>${STYLE}</style>
 </head>
 <body>
@@ -273,6 +313,7 @@ export function contributorPage(
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="${escapeHtml(links.image)}">
 <link rel="canonical" href="${escapeHtml(links.self)}">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>${STYLE}</style>
 </head>
 <body>

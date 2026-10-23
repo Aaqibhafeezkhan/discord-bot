@@ -14,6 +14,21 @@ export function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
 }
 
+export function truncateReleaseNotes(notes: string, releaseUrl: string, limit = 3500): string {
+  if (notes.length <= limit) return notes;
+
+  const suffix = `\n[Read the full notes](${releaseUrl})`;
+  const budget = Math.min(limit, 4096 - suffix.length);
+
+  const cut = notes.lastIndexOf("\n", budget);
+  const trimmed = (cut > 0 ? notes.slice(0, cut) : notes.slice(0, budget)).trimEnd();
+
+  const fenceCount = (trimmed.match(/^```/gm) ?? []).length;
+  const closeIfNeeded = fenceCount % 2 !== 0 ? "\n```" : "";
+
+  return `${trimmed}${closeIfNeeded}${suffix}`;
+}
+
 // Markdown characters in a title would otherwise change how the line renders.
 export function escapeMarkdown(text: string): string {
   return text.replace(/([\\*_~`|>\[\]()])/g, "\\$1");
@@ -33,7 +48,7 @@ export function releaseMessage(repo: string, release: { name: string | null; tag
       {
         title: truncate(title, 256),
         url: release.html_url,
-        description: truncate(release.body?.trim() || "No release notes.", 3500),
+        description: truncateReleaseNotes(release.body?.trim() || "No release notes.", release.html_url),
         color: COLOR.release,
       },
     ],
@@ -70,6 +85,9 @@ const person = (login: string, discordId?: string) =>
 
 const joinNames = (names: string[]) => names.join(", ").replace(/, ([^,]*)$/, " and $1");
 
+/** "the **Contributor** role" for one name, "the **Contributor** and **Top Contributor** roles" for more. */
+export const roleLabel = (names: string[]) => `${joinNames(names)} ${names.length === 1 ? "role" : "roles"}`;
+
 export function mergedPrMessage(
   pr: {
     repo: string;
@@ -79,6 +97,8 @@ export function mergedPrMessage(
     login: string;
     /** The author's Discord id, when they've linked their GitHub account. */
     discordId?: string;
+    /** True when members can link their GitHub account with /link. */
+    linking?: boolean;
     /** Roles this merge earned them. */
     newRoles?: string[];
   },
@@ -98,9 +118,17 @@ export function mergedPrMessage(
       // Reaching the minimum isn't a win yet: only the top N get the reward.
       description += `\nWith ${countInWindow.count} they now qualify for ${q.reward}, which goes to the top ${q.topN} when the program ends.${q.note ? ` ${q.note}` : ""}`;
     }
+    // Only unlinked authors get a nudge, on their first counted PR or the one that qualifies them.
+    if (pr.linking && !pr.discordId) {
+      if (q) {
+        description += "\nWinners are contacted by Discord DM, so run `/link` in this server to tell us which Discord account is yours.";
+      } else if (countInWindow.count === 1) {
+        description += "\nNew here? Run `/link` in this server to connect your GitHub account and get the Contributor role.";
+      }
+    }
   }
   if (pr.newRoles?.length) {
-    description += `\nThat earns them the ${joinNames(pr.newRoles.map((r) => `**${r}**`))} role.`;
+    description += `\nThat earns them the ${roleLabel(pr.newRoles.map((r) => `**${r}**`))}.`;
   }
   return { embeds: [{ description, color: COLOR.merged }] };
 }
@@ -175,7 +203,7 @@ export function starterIssuesReply(
   const embeds: Embed[] = issuesByRepo.map(({ repo, issues }) => {
     // A comma between quoted labels means "any of these" in GitHub search.
     const labelFilter = labels.map((l) => `"${l}"`).join(",");
-    const listUrl = `https://github.com/${cfg.org}/${repo}/issues?q=${encodeURIComponent(`is:issue is:open no:assignee label:${labelFilter}`)}`;
+    const listUrl = `https://github.com/${cfg.org}/${repo}/issues?q=${encodeURIComponent(`is:issue is:open no:assignee -label:blocked label:${labelFilter}`)}`;
     const lines = issues
       .slice(0, perRepo)
       .map((i) => `[#${i.number}](${i.url}) ${escapeMarkdown(truncate(i.title, 90))}`);
@@ -371,7 +399,7 @@ export function meReply(input: {
     `You're linked to **${escapeMarkdown(input.login)}** on GitHub.`,
     `Merged PRs in our repos: **${input.merged}**.`,
   ];
-  if (input.newRoles.length) lines.push(`You now have the ${joinNames(input.newRoles.map((r) => `**${r}**`))} role.`);
+  if (input.newRoles.length) lines.push(`You now have the ${roleLabel(input.newRoles.map((r) => `**${r}**`))}.`);
   if (input.maintainer) lines.push("You're a maintainer, so you're not on the leaderboard and the contributor roles aren't for you.");
 
   const s = input.standing;
