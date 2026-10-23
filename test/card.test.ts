@@ -3,7 +3,7 @@ import { boardSvg, boardVersion, cardSvg, escapeXml, fitMono, progressBar } from
 import { getConfig } from "../src/config";
 import worker from "../src/index";
 import { contributorPage, noticePage } from "../src/page";
-import { FakeCache, makeCtx, makeEnv, mockFetch } from "./helpers";
+import { FakeCache, makeCtx, makeEnv, mockFetch, OCTOBER } from "./helpers";
 
 // The real module needs the WebAssembly rasterizer and the font files, which
 // only the Workers bundler can load. The route is tested with a stand-in.
@@ -351,6 +351,40 @@ describe("GET /leaderboard/{id}/u/{login}", () => {
     expect((await get("/leaderboard/2026-10/u/-ada")).status).toBe(404);
     expect((await get("/leaderboard/2026-10/u/a/b")).status).toBe(404);
     expect((await get(`/leaderboard/2026-10/u/${"a".repeat(40)}`)).status).toBe(404);
+    expect(rendered).toHaveLength(0);
+  });
+
+  it.each([
+    { id: "ended", start: "2025-10-01T00:00:00Z", end: "2025-10-31T23:59:59Z", ended: true },
+    { id: "running", start: "2000-01-01T00:00:00Z", end: "2099-12-31T23:59:59Z", ended: false },
+    { id: "upcoming", start: "2100-10-01T00:00:00Z", end: "2100-10-31T23:59:59Z", ended: false },
+  ])("keeps the no-card page accurate for an $id program", async ({ id, start, end, ended }) => {
+    env = makeEnv({ PROGRAMS: [{ ...OCTOBER, id, title: "Community program", start, end }] });
+    mockFetch(() => ({ total_count: 0, items: [] }));
+
+    const res = await get(`/leaderboard/${id}/u/bob`);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Referrer-Policy")).toBe("strict-origin-when-cross-origin");
+    expect(res.headers.get("Content-Security-Policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    const html = await res.text();
+    expect(html).toContain("<h1>No card yet</h1>");
+    expect(html).toContain("bob has no counted pull requests in Community program.");
+    expect(html).toContain(`<a href="/leaderboard/${id}">See the leaderboard</a>`);
+    expect(html).toContain('<a href="https://github.com/search?q=example">Find an issue</a>');
+    const futureCard = "A card appears with the first merged pull request that counts.";
+    const endedMessage = "Community program is over, so no more pull requests can count.";
+    expect(html).toContain(ended ? endedMessage : futureCard);
+    expect(html).not.toContain(ended ? futureCard : endedMessage);
+    expect(html).not.toContain("you had no counted PRs");
+
+    const image = await get(`/leaderboard/${id}/u/bob.png`);
+    expect(image.status).toBe(404);
+    expect(await image.text()).toBe("not found");
     expect(rendered).toHaveLength(0);
   });
 

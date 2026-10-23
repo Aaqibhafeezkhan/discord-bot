@@ -268,13 +268,16 @@ async function handleContributor(
   const index = board.rows.findIndex((r) => r.login.toLowerCase() === login.toLowerCase());
   const row = board.rows[index];
   const boardPath = `/leaderboard/${program.id}`;
+  const status = programStatus(program, now);
   if (!row) {
     if (asPng) return new Response("not found", { status: 404 });
     const body = noticePage(
       "No card yet",
       [
         `${login} has no counted pull requests in ${program.title}.`,
-        "A card appears with the first merged pull request that counts.",
+        status === "ended"
+            ? `${program.title} is over, so no more pull requests can count.`
+          : "A card appears with the first merged pull request that counts.",
       ],
       false,
       "No card",
@@ -288,7 +291,6 @@ async function handleContributor(
 
   const rank = index + 1;
   const of = board.rows.length;
-  const status = programStatus(program, now);
   const path = `${boardPath}/u/${encodeURIComponent(row.login)}`;
   // The version makes share previews pick up a new image when the numbers change.
   const version = `${row.count}-${rank}-${of}-${status}`;
