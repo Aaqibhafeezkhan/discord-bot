@@ -2,7 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { boardSvg, boardVersion, cardSvg, escapeXml, fitMono, progressBar } from "../src/card";
 import { getConfig } from "../src/config";
 import worker from "../src/index";
-import { contributorPage } from "../src/page";
+import { contributorPage, noticePage } from "../src/page";
 import { FakeCache, makeCtx, makeEnv, mockFetch } from "./helpers";
 
 // The real module needs the WebAssembly rasterizer and the font files, which
@@ -266,6 +266,24 @@ describe("contributorPage", () => {
   });
 });
 
+describe("noticePage links", () => {
+  it("shows supplied links with the cta styling and escapes labels and destinations", () => {
+    const html = noticePage("No card yet", ["Nothing here."], false, "No card", [
+      { label: `<script>"label"</script>`, href: `https://example.com/?a="b"&c=<d>` },
+    ]);
+    expect(html).toContain('<div class="cta">');
+    expect(html).toContain('href="https://example.com/?a=&quot;b&quot;&amp;c=&lt;d&gt;"');
+    expect(html).toContain("&lt;script&gt;&quot;label&quot;&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+  });
+
+  it("leaves pages without links as they were", () => {
+    const html = noticePage("GitHub linked", ["Everything is linked."], true);
+    expect(html).not.toContain('<div class="cta">');
+    expect(html).toContain('<section class="rules">\n<p>Everything is linked.</p>\n</section>\n<p class="status running">Done</p>');
+  });
+});
+
 describe("GET /leaderboard/{id}/u/{login}", () => {
   let env = makeEnv();
   const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
@@ -325,6 +343,9 @@ describe("GET /leaderboard/{id}/u/{login}", () => {
     const html = await page.text();
     expect(html).toContain("<h1>No card yet</h1>");
     expect(html).toContain("bob has no counted pull requests in Hacktoberfest 2026.");
+    expect(html).toContain('<a href="/leaderboard/2026-10">See the leaderboard</a>');
+    expect(html).toContain('<a href="https://github.com/search?q=example">Find an issue</a>');
+    expect(html).not.toContain("The leaderboard is at");
     expect((await get("/leaderboard/2026-10/u/bob.png")).status).toBe(404);
     expect((await get("/leaderboard/2025-01/u/ada")).status).toBe(404);
     expect((await get("/leaderboard/2026-10/u/-ada")).status).toBe(404);

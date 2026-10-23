@@ -232,7 +232,13 @@ ${links.others.length ? `<section class="others">\n<h2>Other programs</h2>\n<ul>
 }
 
 /** A small page with a heading and a few paragraphs, for the result of /link. Everything is escaped. */
-export function noticePage(title: string, lines: string[], ok: boolean, label = ok ? "Done" : "Not linked"): string {
+export function noticePage(
+  title: string,
+  lines: string[],
+  ok: boolean,
+  label = ok ? "Done" : "Not linked",
+  links: { label: string; href: string }[] = []
+): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -250,7 +256,7 @@ export function noticePage(title: string, lines: string[], ok: boolean, label = 
 <section class="rules">
 ${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("\n")}
 </section>
-<p class="status ${ok ? "running" : ""}">${escapeHtml(label)}</p>
+${links.length ? `<div class="cta">\n${links.map((link) => `<a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a>`).join("\n")}\n</div>\n` : ""}<p class="status ${ok ? "running" : ""}">${escapeHtml(label)}</p>
 </main>
 </body>
 </html>`;
