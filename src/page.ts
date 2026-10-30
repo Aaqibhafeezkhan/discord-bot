@@ -111,6 +111,7 @@ h1{font:700 clamp(28px,6vw,40px)/1.15 ui-monospace,SFMono-Regular,Menlo,monospac
 .status{display:inline-block;font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;padding:7px 11px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin:0 0 28px}
 .status.running{color:var(--cyan);border-color:var(--cyan)}
 .status.ended{color:var(--gold);border-color:var(--gold)}
+.unlinked{margin:0 0 24px;color:var(--muted);font-size:14px;line-height:1.5}
 .lede{margin-bottom:14px}
 .others{margin:0 0 36px}
 .others h2{font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}
@@ -132,7 +133,7 @@ main.wide{max-width:920px}
 h2.small{font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);margin:0 0 12px}
 @media (max-width:520px){.tiles{grid-template-columns:1fr}.cta a{flex:1 1 100%;text-align:center}}
 footer{color:var(--muted);font-size:13px}
-@media (max-width:520px){.chip{display:none}}
+@media (max-width:520px){.board summary{gap:8px}.rank{width:auto}.board img{width:28px;height:28px}.chip,.count-label{display:none}}
 `;
 
 export interface PageLinks {
@@ -147,13 +148,15 @@ export interface PageLinks {
   others: { title: string; path: string }[];
 }
 
+const joinNames = (names: string[]) => names.join(", ").replace(/, ([^,]*)$/, " and $1");
+
 export function leaderboardPage(
   board: Leaderboard,
   program: Program,
   links: PageLinks,
   now: Date,
   /** `linking`: members can link their GitHub account with /link, which is how we find a winner on Discord. */
-  opts: { linking?: boolean } = {}
+  opts: { linking?: boolean; members?: Map<string, string> } = {}
 ): string {
   const { title, label, start, end, minPrs, topN, reward, note } = program;
   const heading = `${title} leaderboard`;
@@ -169,19 +172,39 @@ export function leaderboardPage(
     ? `Share image: ${heading}. ${top}.`
     : `Share image: ${heading}. No merged pull requests counted yet.`;
 
+  let unlinkedNotice = "";
+  if (opts.linking && opts.members) {
+    const candidates = state.status === "ended"
+      ? board.rows.filter((r) => r.winner)
+      : board.rows.filter((r) => r.qualifies);
+    const unlinked = candidates.filter((r) => !opts.members?.has(r.login.toLowerCase()));
+    if (unlinked.length > 0) {
+      const names = joinNames(
+        unlinked.map((r) => `<a href="https://github.com/${encodeURIComponent(r.login)}">${escapeHtml(r.login)}</a>`)
+      );
+      if (state.status === "ended") {
+        const verb = unlinked.length === 1 ? "won but hasn't" : "won but haven't";
+        unlinkedNotice = `<p class="unlinked">${names} ${verb} linked their GitHub yet. <a href="${escapeHtml(links.discord)}">Join the Discord</a> and run <code>/link</code> there, so we can reach you.</p>`;
+      } else {
+        const qualifyVerb = unlinked.length === 1 ? "qualifies but hasn't" : "qualify but haven't";
+        unlinkedNotice = `<p class="unlinked">${names} ${qualifyVerb} linked their GitHub yet. <a href="${escapeHtml(links.discord)}">Join the Discord</a> and run <code>/link</code> there, so we can reach you if you win.</p>`;
+      }
+    }
+  }
+
   const rows = board.rows
     .map((row, i) => {
       const login = escapeHtml(row.login);
       const chip = standing(row, program, state.status);
       const chipHtml = chip ? `<span class="chip ${chip.kind}">${escapeHtml(chip.text)}</span>` : "";
-      const card = `<a class="cardlink" href="/leaderboard/${escapeHtml(program.id)}/u/${encodeURIComponent(row.login)}" title="${login}'s share card">Card</a>`;
+      const card = `<a class="cardlink" href="/leaderboard/${escapeHtml(program.id)}/u/${encodeURIComponent(row.login)}" title="${login}'s share card" aria-label="${login}'s share card">Card</a>`;
       const prList = row.prs
         .map(
           (pr) =>
             `<li><a href="${escapeHtml(pr.url)}"><span class="repo">${escapeHtml(pr.repo)}#${pr.number}</span>${escapeHtml(pr.title)}</a></li>`
         )
         .join("\n");
-      return `<li><details><summary><span class="rank">${i + 1}</span><img src="https://github.com/${encodeURIComponent(row.login)}.png?size=72" alt="" width="36" height="36" loading="lazy"><span class="who"><a href="https://github.com/${encodeURIComponent(row.login)}">${login}</a></span><span class="count">${row.count} merged ${row.count === 1 ? "PR" : "PRs"}</span>${chipHtml}${card}</summary>\n<ul class="prs">\n${prList}\n</ul></details></li>`;
+      return `<li><details><summary><span class="rank">${i + 1}</span><img src="https://github.com/${encodeURIComponent(row.login)}.png?size=72" alt="" width="36" height="36" loading="lazy"><span class="who"><a href="https://github.com/${encodeURIComponent(row.login)}">${login}</a></span><span class="count">${row.count}<span class="count-label"> merged ${row.count === 1 ? "PR" : "PRs"}</span></span>${chipHtml}${card}</summary>\n<ul class="prs">\n${prList}\n</ul></details></li>`;
     })
     .join("\n");
 
@@ -192,6 +215,7 @@ export function leaderboardPage(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(heading)}</title>
 <meta name="description" content="${escapeHtml(description)}">
+<meta property="og:type" content="website">
 <meta property="og:title" content="${escapeHtml(heading)}">
 <meta property="og:description" content="${escapeHtml(description)}">
 <meta property="og:image" content="${escapeHtml(links.image)}">
@@ -211,6 +235,7 @@ export function leaderboardPage(
 <h1>${escapeHtml(heading)}</h1>
 <p class="lede">Merged pull requests in ${escapeHtml(repos)}, ${when}.</p>
 <p class="status ${state.status}">${escapeHtml(state.text)}</p>
+${unlinkedNotice}
 ${board.rows.length ? `<ol class="board">\n${rows}\n</ol>` : `<div class="board"><p class="empty">${state.status === "ended" ? "No merged pull requests were counted." : "No merged pull requests counted yet. Pick an issue and be the first."}</p></div>`}
 <section class="rules">
 <h2>How it works</h2>
@@ -232,7 +257,13 @@ ${links.others.length ? `<section class="others">\n<h2>Other programs</h2>\n<ul>
 }
 
 /** A small page with a heading and a few paragraphs, for the result of /link. Everything is escaped. */
-export function noticePage(title: string, lines: string[], ok: boolean, label = ok ? "Done" : "Not linked"): string {
+export function noticePage(
+  title: string,
+  lines: string[],
+  ok: boolean,
+  label = ok ? "Done" : "Not linked",
+  links: { label: string; href: string }[] = []
+): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -250,7 +281,7 @@ export function noticePage(title: string, lines: string[], ok: boolean, label = 
 <section class="rules">
 ${lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("\n")}
 </section>
-<p class="status ${ok ? "running" : ""}">${escapeHtml(label)}</p>
+${links.length ? `<div class="cta">\n${links.map((link) => `<a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a>`).join("\n")}\n</div>\n` : ""}<p class="status ${ok ? "running" : ""}">${escapeHtml(label)}</p>
 </main>
 </body>
 </html>`;

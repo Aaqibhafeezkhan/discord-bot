@@ -2,8 +2,8 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import { boardSvg, boardVersion, cardSvg, escapeXml, fitMono, progressBar } from "../src/card";
 import { getConfig } from "../src/config";
 import worker from "../src/index";
-import { contributorPage } from "../src/page";
-import { FakeCache, makeCtx, makeEnv, mockFetch } from "./helpers";
+import { contributorPage, noticePage } from "../src/page";
+import { FakeCache, makeCtx, makeEnv, mockFetch, OCTOBER } from "./helpers";
 
 // The real module needs the WebAssembly rasterizer and the font files, which
 // only the Workers bundler can load. The route is tested with a stand-in.
@@ -266,6 +266,24 @@ describe("contributorPage", () => {
   });
 });
 
+describe("noticePage links", () => {
+  it("shows supplied links with the cta styling and escapes labels and destinations", () => {
+    const html = noticePage("No card yet", ["Nothing here."], false, "No card", [
+      { label: `<script>"label"</script>`, href: `https://example.com/?a="b"&c=<d>` },
+    ]);
+    expect(html).toContain('<div class="cta">');
+    expect(html).toContain('href="https://example.com/?a=&quot;b&quot;&amp;c=&lt;d&gt;"');
+    expect(html).toContain("&lt;script&gt;&quot;label&quot;&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+  });
+
+  it("leaves pages without links as they were", () => {
+    const html = noticePage("GitHub linked", ["Everything is linked."], true);
+    expect(html).not.toContain('<div class="cta">');
+    expect(html).toContain('<section class="rules">\n<p>Everything is linked.</p>\n</section>\n<p class="status running">Done</p>');
+  });
+});
+
 describe("GET /leaderboard/{id}/u/{login}", () => {
   let env = makeEnv();
   const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
@@ -296,7 +314,19 @@ describe("GET /leaderboard/{id}/u/{login}", () => {
     expect(html).toContain("https://bot.example/leaderboard/2026-10/u/Ada.png?v=2-1-2-");
     const prs = /href="(https:\/\/github\.com\/search\?[^"]+)"/.exec(html)![1]!.replace(/&amp;/g, "&");
     expect(new URL(prs).searchParams.get("q")).toBe(
-      'org:codercops is:pr is:merged author:Ada label:"hacktoberfest-accepted" merged:2026-10-01..2026-10-31'
+      'is:pr is:merged author:Ada label:"hacktoberfest-accepted" merged:2026-10-01..2026-10-31 repo:codercops/chatcops repo:codercops/ogcops repo:codercops/toolbelt'
+    );
+  });
+
+  it("links to a search scoped to the program's own repos", async () => {
+    env = makeEnv({ PROGRAMS: [{ ...OCTOBER, repos: ["special-repo", "another-repo"] }] });
+    mockFetch(search);
+    const res = await get("/leaderboard/2026-10/u/ada");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const prs = /href="(https:\/\/github\.com\/search\?[^"]+)"/.exec(html)![1]!.replace(/&amp;/g, "&");
+    expect(new URL(prs).searchParams.get("q")).toBe(
+      'is:pr is:merged author:Ada label:"hacktoberfest-accepted" merged:2026-10-01..2026-10-31 repo:codercops/special-repo repo:codercops/another-repo'
     );
   });
 
@@ -325,11 +355,48 @@ describe("GET /leaderboard/{id}/u/{login}", () => {
     const html = await page.text();
     expect(html).toContain("<h1>No card yet</h1>");
     expect(html).toContain("bob has no counted pull requests in Hacktoberfest 2026.");
+    expect(html).toContain('<a href="/leaderboard/2026-10">See the leaderboard</a>');
+    expect(html).toContain('<a href="https://github.com/search?q=example">Find an issue</a>');
+    expect(html).not.toContain("The leaderboard is at");
     expect((await get("/leaderboard/2026-10/u/bob.png")).status).toBe(404);
     expect((await get("/leaderboard/2025-01/u/ada")).status).toBe(404);
     expect((await get("/leaderboard/2026-10/u/-ada")).status).toBe(404);
     expect((await get("/leaderboard/2026-10/u/a/b")).status).toBe(404);
     expect((await get(`/leaderboard/2026-10/u/${"a".repeat(40)}`)).status).toBe(404);
+    expect(rendered).toHaveLength(0);
+  });
+
+  it.each([
+    { id: "ended", start: "2025-10-01T00:00:00Z", end: "2025-10-31T23:59:59Z", ended: true },
+    { id: "running", start: "2000-01-01T00:00:00Z", end: "2099-12-31T23:59:59Z", ended: false },
+    { id: "upcoming", start: "2100-10-01T00:00:00Z", end: "2100-10-31T23:59:59Z", ended: false },
+  ])("keeps the no-card page accurate for an $id program", async ({ id, start, end, ended }) => {
+    env = makeEnv({ PROGRAMS: [{ ...OCTOBER, id, title: "Community program", start, end }] });
+    mockFetch(() => ({ total_count: 0, items: [] }));
+
+    const res = await get(`/leaderboard/${id}/u/bob`);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Referrer-Policy")).toBe("strict-origin-when-cross-origin");
+    expect(res.headers.get("Content-Security-Policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
+    const html = await res.text();
+    expect(html).toContain("<h1>No card yet</h1>");
+    expect(html).toContain("bob has no counted pull requests in Community program.");
+    expect(html).toContain(`<a href="/leaderboard/${id}">See the leaderboard</a>`);
+    expect(html).toContain('<a href="https://github.com/search?q=example">Find an issue</a>');
+    const futureCard = "A card appears with the first merged pull request that counts.";
+    const endedMessage = "Community program is over, so no more pull requests can count.";
+    expect(html).toContain(ended ? endedMessage : futureCard);
+    expect(html).not.toContain(ended ? futureCard : endedMessage);
+    expect(html).not.toContain("you had no counted PRs");
+
+    const image = await get(`/leaderboard/${id}/u/bob.png`);
+    expect(image.status).toBe(404);
+    expect(await image.text()).toBe("not found");
     expect(rendered).toHaveLength(0);
   });
 
@@ -426,13 +493,28 @@ describe("the card cache", () => {
     const { ctx, settle } = makeCtx();
     await worker.fetch(new Request("https://bot.example/leaderboard/2026-10/u/Ada.png", { method: "HEAD" }), env, ctx);
     await settle();
-    const stored = cache.entries.get("https://bot.example/leaderboard/2026-10/u/Ada.png");
+    const keys = [...cache.entries.keys()];
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^https:\/\/bot\.example\/leaderboard\/2026-10\/u\/Ada\.png\?v=1-1-1-/);
+    const stored = cache.entries.get(keys[0]!);
     expect(stored).toBeDefined();
     expect(stored!.body.byteLength).toBeGreaterThan(0);
 
     // A GET after the HEAD still gets the whole picture.
     const res = await worker.fetch(new Request("https://bot.example/leaderboard/2026-10/u/Ada.png"), env, ctx);
     expect([...new Uint8Array(await res.arrayBuffer())]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+  });
+
+  it("draws the card once per version, whatever ?v= or letter case the address has", async () => {
+    mockFetch(search);
+    const { ctx, settle } = makeCtx();
+    for (const path of ["/leaderboard/2026-10/u/Ada.png?v=1", "/leaderboard/2026-10/u/ada.png?v=2", "/leaderboard/2026-10/u/ADA.png", "/leaderboard/2026-10/u/Ada.png?v=x&y=z"]) {
+      const res = await worker.fetch(new Request(`https://bot.example${path}`), env, ctx);
+      expect(res.status).toBe(200);
+      await settle();
+    }
+    expect(rendered).toHaveLength(1);
+    expect(cache.entries.size).toBe(1);
   });
 });
 
@@ -563,8 +645,38 @@ describe("the board image cache", () => {
     const { ctx, settle } = makeCtx();
     await worker.fetch(new Request("https://bot.example/leaderboard/2026-10.png", { method: "HEAD" }), env, ctx);
     await settle();
-    const stored = cache.entries.get("https://bot.example/leaderboard/2026-10.png");
+    const keys = [...cache.entries.keys()];
+    expect(keys).toHaveLength(1);
+    const stored = cache.entries.get(keys[0]!);
     expect(stored).toBeDefined();
     expect(stored!.body.byteLength).toBeGreaterThan(0);
+  });
+
+  it("draws the image once per board version, whatever ?v= the address has", async () => {
+    mockFetch(search);
+    const { ctx, settle } = makeCtx();
+    const html = await (await worker.fetch(new Request("https://bot.example/leaderboard/2026-10"), env, ctx)).text();
+    const image = /<meta property="og:image" content="([^"]+)">/.exec(html)![1]!;
+    for (const query of ["?v=1", "?v=2", "", "?v=x&y=z"]) {
+      const res = await worker.fetch(new Request(`https://bot.example/leaderboard/2026-10.png${query}`), env, ctx);
+      expect(res.status).toBe(200);
+      await settle();
+    }
+    expect(rendered).toHaveLength(1);
+    // Stored under the address the page shares, so a preview of it finds the copy.
+    expect([...cache.entries.keys()]).toEqual([image]);
+  });
+
+  it("draws a new image once the board changes", async () => {
+    mockFetch(search);
+    const { ctx, settle } = makeCtx();
+    await worker.fetch(new Request("https://bot.example/leaderboard/2026-10.png?v=1"), env, ctx);
+    await settle();
+    env = makeEnv();
+    mockFetch(() => ({ ...search(), total_count: 2, items: [...search().items, { ...search().items[0]!, html_url: "https://github.com/codercops/toolbelt/pull/2", number: 2 }] }));
+    await worker.fetch(new Request("https://bot.example/leaderboard/2026-10.png?v=1"), env, ctx);
+    await settle();
+    expect(rendered).toHaveLength(2);
+    expect(cache.entries.size).toBe(2);
   });
 });

@@ -82,9 +82,36 @@ describe("leaderboardPage", () => {
     expect(html).toContain("<h1>Hacktoberfest 2026 leaderboard</h1>");
     expect(html.indexOf(">ada<")).toBeLessThan(html.indexOf(">bob<"));
     expect(html).toContain('<a href="https://github.com/ada">ada</a>');
-    expect(html).toContain("6 merged PRs");
+    expect(html).toContain('<span class="count">6<span class="count-label"> merged PRs</span></span>');
     expect(html).toContain('<span class="chip top">In the top 5</span>');
     expect(html).toContain('<span class="chip progress">3 more to qualify</span>');
+  });
+
+  it("keeps the merged PR label in its own span and uses compact, single-line phone styles", () => {
+    expect(html).toContain('<span class="count">6<span class="count-label"> merged PRs</span></span>');
+    const one = leaderboardPage({ ...board, rows: [row("ada", 1)] }, program, links, during);
+    expect(one).toContain('<span class="count">1<span class="count-label"> merged PR</span></span>');
+
+    const style = html.slice(html.indexOf("<style>") + 7, html.indexOf("</style>"));
+    const start = style.indexOf("@media (max-width:520px){.board summary");
+    const phoneRule = style.slice(start, style.indexOf("\n", start));
+    expect(phoneRule).toContain(".board summary{gap:8px}");
+    expect(phoneRule).toContain(".rank{width:auto}");
+    expect(phoneRule).toContain(".board img{width:28px;height:28px}");
+    expect(phoneRule).toContain(".chip,.count-label{display:none}");
+    expect(phoneRule).not.toContain(".who{");
+    expect(style).toContain(".who{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}");
+    expect(style).not.toContain("overflow-wrap:anywhere");
+    expect(phoneRule).not.toContain(".count{display:none}");
+    expect(phoneRule).not.toContain(".cardlink{display:none}");
+    expect(html).toContain('<a class="cardlink" href="/leaderboard/2026-10/u/ada"');
+  });
+
+  it("gives each Card link the person's share card accessible name", () => {
+    const cards = html.match(/<a class="cardlink"[^>]*>Card<\/a>/g);
+    expect(cards).toEqual(board.rows.map(({ login }) =>
+      `<a class="cardlink" href="/leaderboard/2026-10/u/${login}" title="${login}'s share card" aria-label="${login}'s share card">Card</a>`
+    ));
   });
 
   it("states the rules, the window and who the reward comes from", () => {
@@ -103,6 +130,65 @@ describe("leaderboardPage", () => {
     );
     // Still true after the end, until the winners have heard from us.
     expect(leaderboardPage(board, program, links, after, { linking: true })).toContain("We contact the winners by Discord DM.");
+  });
+
+  it("names everyone who qualifies and hasn't linked, in board order, with links to their profiles", () => {
+    const unlinked = leaderboardPage(board, program, links, during, { linking: true, members: new Map() });
+    expect(unlinked).toContain(
+      '<p class="unlinked"><a href="https://github.com/ada">ada</a> and <a href="https://github.com/bob">bob</a> qualify but haven\'t linked their GitHub yet. <a href="https://discord.gg/example">Join the Discord</a> and run <code>/link</code> there, so we can reach you if you win.</p>'
+    );
+    // Board order: ada before bob
+    expect(unlinked.indexOf(">ada<")).toBeLessThan(unlinked.indexOf(">bob<"));
+
+    // Nobody who has linked is named; singular verb when only one remains
+    const adaLinked = leaderboardPage(board, program, links, during, { linking: true, members: new Map([["ada", "42"]]) });
+    expect(adaLinked).toContain(
+      '<p class="unlinked"><a href="https://github.com/bob">bob</a> qualifies but hasn\'t linked their GitHub yet. <a href="https://discord.gg/example">Join the Discord</a> and run <code>/link</code> there, so we can reach you if you win.</p>'
+    );
+    expect(adaLinked).not.toContain("ada and");
+  });
+
+  it("names only winners who haven't linked after the end", () => {
+    // In 'after', ada is a winner (winner: true), bob qualifies but is outside top 5 (winner: false)
+    const ended = leaderboardPage(board, program, links, after, { linking: true, members: new Map() });
+    expect(ended).toContain(
+      '<p class="unlinked"><a href="https://github.com/ada">ada</a> won but hasn\'t linked their GitHub yet. <a href="https://discord.gg/example">Join the Discord</a> and run <code>/link</code> there, so we can reach you.</p>'
+    );
+    // The unlinked notice should only mention winners (ada), not qualifiers like bob
+    const unlinkedPart = ended.slice(ended.indexOf('<p class="unlinked"'), ended.indexOf('</p>', ended.indexOf('<p class="unlinked"')) + 4);
+    expect(unlinkedPart).not.toContain("bob");
+  });
+
+  it("adds no unlinked line when linking is off, nobody qualifies, or everyone has linked", () => {
+    // Linking is off
+    expect(leaderboardPage(board, program, links, during, { linking: false, members: new Map() })).not.toContain('class="unlinked"');
+    // Members map not passed / lookup not performed
+    expect(leaderboardPage(board, program, links, during, { linking: true })).not.toContain('class="unlinked"');
+    // Nobody qualifies
+    const nobodyQualifies = { ...board, rows: [row("cy", 2), row("dee", 4)] };
+    expect(leaderboardPage(nobodyQualifies, program, links, during, { linking: true, members: new Map() })).not.toContain('class="unlinked"');
+    // Everyone who qualifies has linked
+    const allLinked = new Map([["ada", "42"], ["bob", "43"]]);
+    expect(leaderboardPage(board, program, links, during, { linking: true, members: allLinked })).not.toContain('class="unlinked"');
+  });
+
+  it("escapes logins in the unlinked line", () => {
+    const evil = leaderboardPage(
+      { ...board, rows: [row('"><script>alert(1)</script>', 6, true, true)] },
+      program,
+      links,
+      during,
+      { linking: true, members: new Map() }
+    );
+    expect(evil).not.toContain("<script>alert(1)</script>");
+    expect(evil).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+  });
+
+  it("shows the unlinked line at phone width", () => {
+    const htmlWithNotice = leaderboardPage(board, program, links, during, { linking: true, members: new Map() });
+    expect(htmlWithNotice).toContain('class="unlinked"');
+    expect(htmlWithNotice).toContain(".chip,.count-label{display:none}");
+    expect(htmlWithNotice).not.toContain(".unlinked{display:none}");
   });
 
   it("links to issues, Discord and the platform, with escaped URLs", () => {
@@ -139,6 +225,12 @@ describe("leaderboardPage", () => {
 
   it("links to the favicon in the head", () => {
     expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg">');
+  });
+
+  it("declares the leaderboard page as an Open Graph website", () => {
+    expect(html.match(/<meta property="og:type" content="[^"]+">/g)).toEqual([
+      '<meta property="og:type" content="website">',
+    ]);
   });
 
   it("has the same share preview tags as a contributor page, pointing at its own image", () => {
@@ -328,7 +420,13 @@ describe("GET /leaderboard", () => {
     const json = await worker.fetch(new Request("https://bot.example/leaderboard/2026-10.json"), env, ctx);
     expect(((await json.json()) as { id: string }).id).toBe("2026-10");
 
-    expect((await worker.fetch(new Request("https://bot.example/leaderboard/2025-10"), env, ctx)).status).toBe(404);
+    const unknownHtml = await worker.fetch(new Request("https://bot.example/leaderboard/2025-10"), env, ctx);
+    expect(unknownHtml.status).toBe(404);
+    expect(unknownHtml.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(await unknownHtml.text()).toBe("not found");
+    const unknownJson = await worker.fetch(new Request("https://bot.example/leaderboard/2025-10.json"), env, ctx);
+    expect(unknownJson.status).toBe(404);
+    expect(unknownJson.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect((await worker.fetch(new Request("https://bot.example/leaderboard", { method: "POST" }), env, ctx)).status).toBe(404);
     const none = await worker.fetch(new Request("https://bot.example/leaderboard"), makeEnv({ PROGRAMS: [] }), ctx);
     expect(none.status).toBe(404);
@@ -362,5 +460,94 @@ describe("GET /leaderboard", () => {
     const res = await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(await res.text()).toBe("GitHub is rate limiting us. Try again in a minute.");
+    const json = await worker.fetch(new Request("https://bot.example/leaderboard.json"), env, ctx);
+    expect(json.status).toBe(503);
+    expect(json.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(json.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(await json.text()).toBe("GitHub is rate limiting us. Try again in a minute.");
+  });
+
+  it("names qualifying unlinked members when linking is enabled", async () => {
+    env = makeEnv({ LINKING: "on", DISCORD_CLIENT_SECRET: "secret" });
+    mockFetch(() => ({
+      total_count: 11,
+      items: [
+        ...Array.from({ length: 6 }, (_, i) => ({
+          html_url: `https://github.com/codercops/toolbelt/pull/${i + 1}`,
+          number: i + 1,
+          title: "PR",
+          repository_url: "https://api.github.com/repos/codercops/toolbelt",
+          user: { login: "ada" },
+          pull_request: { merged_at: "2026-10-02T00:00:00Z" },
+        })),
+        ...Array.from({ length: 5 }, (_, i) => ({
+          html_url: `https://github.com/codercops/toolbelt/pull/${i + 7}`,
+          number: i + 7,
+          title: "PR",
+          repository_url: "https://api.github.com/repos/codercops/toolbelt",
+          user: { login: "bob" },
+          pull_request: { merged_at: "2026-10-03T00:00:00Z" },
+        })),
+      ],
+    }));
+
+    const res = await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('class="unlinked"');
+    expect(text).toContain(">ada<");
+    expect(text).toContain(">bob<");
+    expect(text).toContain("qualify but haven't linked their GitHub yet");
+  });
+
+  it("only looks up qualifying rows in KV and keeps the page working if the lookup fails", async () => {
+    env = makeEnv({ LINKING: "on", DISCORD_CLIENT_SECRET: "secret" });
+    mockFetch(() => ({
+      total_count: 6,
+      items: [
+        ...Array.from({ length: 5 }, (_, i) => ({
+          html_url: `https://github.com/codercops/toolbelt/pull/${i + 1}`,
+          number: i + 1,
+          title: "PR",
+          repository_url: "https://api.github.com/repos/codercops/toolbelt",
+          user: { login: "ada" },
+          pull_request: { merged_at: "2026-10-02T00:00:00Z" },
+        })),
+        {
+          html_url: "https://github.com/codercops/toolbelt/pull/6",
+          number: 6,
+          title: "PR",
+          repository_url: "https://api.github.com/repos/codercops/toolbelt",
+          user: { login: "nonqualifying" },
+          pull_request: { merged_at: "2026-10-02T00:00:00Z" },
+        },
+      ],
+    }));
+
+    const lookups: string[] = [];
+    const origGet = env.STATE.get.bind(env.STATE);
+    env.STATE.get = (async (key: string, type?: "json") => {
+      lookups.push(key);
+      return origGet(key, type as any);
+    }) as any;
+
+    const res = await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
+    expect(res.status).toBe(200);
+    // Only ada qualified (5 PRs >= minPrs 5), nonqualifying had 1 PR
+    const linkLookups = lookups.filter((k) => k.startsWith("link:github:"));
+    expect(linkLookups).toEqual(["link:github:ada"]);
+    expect(linkLookups).not.toContain("link:github:nonqualifying");
+
+    // If KV lookup throws for link keys, page still renders 200 without the line
+    env.STATE.get = (async (key: string, type?: "json") => {
+      if (key.startsWith("link:github:")) throw new Error("KV read failed");
+      return origGet(key, type as any);
+    }) as any;
+    const failRes = await worker.fetch(new Request("https://bot.example/leaderboard"), env, ctx);
+    expect(failRes.status).toBe(200);
+    const failHtml = await failRes.text();
+    expect(failHtml).not.toContain('class="unlinked"');
   });
 });

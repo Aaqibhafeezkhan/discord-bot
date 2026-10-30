@@ -225,6 +225,15 @@ describe("leaderboardMessage", () => {
     expect(embed?.description).not.toContain("more to qualify");
   });
 
+  it("says 'qualified' for qualifiers who didn't win once the program is over", () => {
+    const qualifiers = { ...board, rows: [row("ada", 6, true, true), row("bob", 5, true)] };
+    const final = leaderboardMessage(qualifiers, program, { final: true }).embeds?.[0]?.description;
+    expect(final).toContain("2. **bob** · 5 merged PRs · qualified");
+    // While it runs, they are still in the running.
+    const running = leaderboardMessage(qualifiers, program).embeds?.[0]?.description;
+    expect(running).toContain("2. **bob** · 5 merged PRs · qualifies");
+  });
+
   it("asks winners who haven't linked to run /link, since the form goes out by DM", () => {
     const winners = { ...board, rows: [row("ada", 6, true, true), row("Bob", 5, true, true), row("cy", 5, true, true)] };
     const text = (members: Map<string, string>) =>
@@ -245,10 +254,18 @@ describe("leaderboardMessage", () => {
   });
 
   it("handles a final result with no qualifiers and an empty board", () => {
-    const none = leaderboardMessage({ ...board, rows: [row("bob", 2)] }, program, { final: true }).embeds?.[0];
-    expect(none?.description).toContain("Nobody reached 5 merged PRs");
+    const empty = leaderboardMessage({ ...board, rows: [] }, program, { final: true }).embeds?.[0];
+    expect(empty?.description).toContain("No merged pull requests were counted.");
+    expect(empty?.description).not.toContain("be the first");
+    // closing note should be added
+    const withNote = leaderboardMessage({ ...board, rows: [] }, program, { final: true, finalNote: "Add it to your profile." }).embeds?.[0];
+    expect(withNote?.description).toContain("Add it to your profile.");
+  });
+
+  it("handles a running empty board", () => {
     const empty = leaderboardMessage({ ...board, rows: [] }, program).embeds?.[0];
     expect(empty?.description).toContain("No merged PRs counted yet");
+    expect(empty?.description).toContain("be the first");
   });
 });
 

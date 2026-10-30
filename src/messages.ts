@@ -156,14 +156,21 @@ export function leaderboardMessage(
     const prs = `${row.count} merged ${row.count === 1 ? "PR" : "PRs"}`;
     // Same as the chips on the page: a countdown while it runs, nothing once it's over.
     const countdown = opts.final ? "" : ` · ${minPrs - row.count} more to qualify`;
-    const note = row.winner ? (opts.final ? " · winner" : " · in the top " + topN) : row.qualifies ? " · qualifies" : countdown;
+    const note = row.winner
+      ? opts.final ? " · winner" : " · in the top " + topN
+      : row.qualifies ? (opts.final ? " · qualified" : " · qualifies") : countdown;
     return `${i + 1}. ${who(row.login)} · ${prs}${note}`;
   });
   const winners = board.rows.filter((r) => r.winner);
 
   let description: string;
   if (lines.length === 0) {
-    description = "No merged PRs counted yet. Pick a starter issue and be the first.";
+    if (opts.final) {
+      description = "No merged pull requests were counted.";
+      if (opts.finalNote) description += `\n\n${opts.finalNote}`;
+    } else {
+      description = "No merged PRs counted yet. Pick a starter issue and be the first.";
+    }
   } else {
     description = lines.join("\n");
     if (opts.final) {

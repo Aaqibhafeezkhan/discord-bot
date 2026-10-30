@@ -3,7 +3,7 @@ import { runCommand, type CommandData, type CommandUser } from "./commands";
 import { DAILY_CRON, getConfig, WELCOME_CRON, type Config, type Env } from "./config";
 import { editInteractionReply, sendMessage } from "./discord";
 import { getLeaderboard } from "./leaderboard";
-import { GithubError } from "./github";
+import { GithubError, mergedPrQuery } from "./github";
 import { linkedMembers } from "./links";
 import { completeLink } from "./linking";
 import { leaderboardMessage, LINK_BUTTON_ID, streaksMessage } from "./messages";
@@ -106,7 +106,7 @@ async function handleLeaderboardPage(request: Request, env: Env, id: string | un
   const cfg = getConfig(env);
   const now = new Date();
   const program = id === undefined ? currentProgram(cfg, now) : findProgram(cfg, id);
-  if (!program) return new Response("not found", { status: 404 });
+  if (!program) return new Response("not found", { status: 404, headers: asJson ? { "Access-Control-Allow-Origin": "*" } : undefined });
   // Browsers and the edge may reuse the response for five minutes.
   const cache = "public, max-age=300";
   try {
@@ -123,8 +123,22 @@ async function handleLeaderboardPage(request: Request, env: Env, id: string | un
       .filter((p) => p.id !== program.id)
       .reverse()
       .map((p) => ({ title: p.title, path: `/leaderboard/${p.id}` }));
+
+    // When linking is enabled, look up which qualifying users have linked their GitHub account.
+    const linking = linkingEnabled(env);
+    let members: Map<string, string> | undefined;
+    if (linking) {
+      const qualifying = board.rows.filter((r) => r.qualifies).map((r) => r.login);
+      try {
+        members = await linkedMembers(env, qualifying);
+      } catch (err) {
+        console.error("failed to look up linked members", err);
+      }
+    }
+
     const html = leaderboardPage(board, program, { issues: env.ISSUES_URL, discord: env.DISCORD_INVITE, self, image, others }, now, {
-      linking: linkingEnabled(env),
+      linking,
+      members,
     });
     return new Response(html, {
       headers: {
@@ -141,9 +155,19 @@ async function handleLeaderboardPage(request: Request, env: Env, id: string | un
     console.error("leaderboard page failed", err);
     return new Response(limited ? "GitHub is rate limiting us. Try again in a minute." : "The leaderboard is unavailable right now.", {
       status: 503,
-      headers: { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60" },
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60", ...(asJson ? { "Access-Control-Allow-Origin": "*" } : {}) },
     });
   }
+}
+
+// The cache key for a drawn image: its path and the version worked out here,
+// whatever `?v=` the request carries. Keyed on the address asked for, every new
+// `?v=` value would mean a new picture to draw. The key is always a GET, because
+// the cache only takes those, so a HEAD finds and stores the image under the
+// same key as a GET (otherwise the cache would throw, and the image would be
+// left empty for the next GET).
+function imageKey(path: string, version: string, request: Request): Request {
+  return new Request(new URL(`${path}?v=${encodeURIComponent(version)}`, request.url).href);
 }
 
 // A program's leaderboard as a share image: /leaderboard/{id}.png. The page's
@@ -156,13 +180,6 @@ async function handleLeaderboardImage(request: Request, env: Env, ctx: Execution
 
   // The image is the same for everyone and costs some CPU to draw, so keep it at the edge.
   const cache = typeof caches !== "undefined" ? await caches.open("cards").catch(() => undefined) : undefined;
-  // The cache only takes GET requests, and it keys on the address. So a HEAD
-  // asks for the image under the key a GET uses, and stores it there too:
-  // otherwise the cache would throw, and the image would be left empty for the
-  // next GET.
-  const cacheKey = request.method === "GET" ? request : new Request(request.url);
-  const cached = await cache?.match(cacheKey);
-  if (cached) return cached;
 
   let board;
   try {
@@ -174,6 +191,10 @@ async function handleLeaderboardImage(request: Request, env: Env, ctx: Execution
       headers: { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60" },
     });
   }
+
+  const cacheKey = imageKey(`/leaderboard/${program.id}.png`, boardVersion(board.rows, program, now), request);
+  const cached = await cache?.match(cacheKey);
+  if (cached) return cached;
 
   // Loaded on demand: this module pulls in the rasterizer and the fonts.
   const { fetchAvatar, renderPng } = await import("./card-image");
@@ -234,16 +255,6 @@ async function handleContributor(
   const program = findProgram(cfg, programId);
   if (!program) return new Response("not found", { status: 404 });
 
-  // The card is the same for everyone and costs some CPU to draw, so keep it at the edge.
-  const cache = asPng && typeof caches !== "undefined" ? await caches.open("cards").catch(() => undefined) : undefined;
-  // The cache only takes GET requests, and it keys on the address. So a HEAD
-  // asks for the card under the key a GET uses, and stores it there too:
-  // otherwise the cache would throw, and the card would be left empty for the
-  // next GET.
-  const cacheKey = request.method === "GET" ? request : new Request(request.url);
-  const cached = await cache?.match(cacheKey);
-  if (cached) return cached;
-
   let board;
   try {
     board = await getLeaderboard(env, cfg, program);
@@ -257,26 +268,40 @@ async function handleContributor(
   const index = board.rows.findIndex((r) => r.login.toLowerCase() === login.toLowerCase());
   const row = board.rows[index];
   const boardPath = `/leaderboard/${program.id}`;
+  const status = programStatus(program, now);
   if (!row) {
     if (asPng) return new Response("not found", { status: 404 });
     const body = noticePage(
       "No card yet",
       [
         `${login} has no counted pull requests in ${program.title}.`,
-        `A card appears with the first merged pull request that counts. The leaderboard is at ${new URL(boardPath, request.url).href}`,
+        status === "ended"
+            ? `${program.title} is over, so no more pull requests can count.`
+          : "A card appears with the first merged pull request that counts.",
       ],
       false,
-      "No card"
+      "No card",
+      [
+        { label: "See the leaderboard", href: boardPath },
+        { label: "Find an issue", href: env.ISSUES_URL },
+      ]
     );
     return new Response(body, { status: 404, headers: { ...PAGE_HEADERS, "Cache-Control": "no-store", "Content-Security-Policy": CONTRIBUTOR_CSP } });
   }
 
   const rank = index + 1;
   const of = board.rows.length;
-  const status = programStatus(program, now);
   const path = `${boardPath}/u/${encodeURIComponent(row.login)}`;
+  // The version makes share previews pick up a new image when the numbers change.
+  const version = `${row.count}-${rank}-${of}-${status}`;
 
   if (asPng) {
+    // The card is the same for everyone and costs some CPU to draw, so keep it at the edge.
+    const cache = typeof caches !== "undefined" ? await caches.open("cards").catch(() => undefined) : undefined;
+    const cacheKey = imageKey(`${path}.png`, version, request);
+    const cached = await cache?.match(cacheKey);
+    if (cached) return cached;
+
     // Loaded on demand: this module pulls in the rasterizer and the fonts.
     const { fetchAvatar, renderPng } = await import("./card-image");
     const svg = cardSvg({
@@ -296,9 +321,7 @@ async function handleContributor(
     return response;
   }
 
-  // The version makes share previews pick up a new image when the numbers change.
-  const version = `${row.count}-${rank}-${of}-${status}`;
-  const prsQuery = `org:${cfg.org} is:pr is:merged author:${row.login} label:"${program.label}" merged:${program.start.toISOString().slice(0, 10)}..${program.end.toISOString().slice(0, 10)}`;
+  const prsQuery = mergedPrQuery(cfg, program, { author: row.login, dayOnly: true });
   const html = contributorPage(
     { program, row, rank, of, generatedAt: board.generatedAt },
     {

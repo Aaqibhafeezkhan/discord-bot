@@ -3,9 +3,9 @@
 import { listCheckins, localDate, rankStreaks, recordCheckin } from "./checkin";
 import type { Config, Env } from "./config";
 import type { MessagePayload } from "./discord";
-import { countMergedPrs, GithubError, listStarterIssues } from "./github";
+import { countMergedPrs, getLoginById, GithubError, listStarterIssues } from "./github";
 import { getLeaderboard } from "./leaderboard";
-import { getLink, linkedMembers, removeLink } from "./links";
+import { getLink, linkedMembers, removeLink, saveLink } from "./links";
 import { checkinReply, helpReply, leaderboardMessage, linkPrompt, meReply, starterIssuesReply, streaksMessage } from "./messages";
 import { authorizeUrl, linkingEnabled, signState } from "./oauth";
 import { grantEarnedRoles, isMaintainer, removeTierRoles } from "./roles";
@@ -23,6 +23,7 @@ export interface CommandUser {
 }
 
 const IN_SERVER_ONLY: MessagePayload = { content: "Run this inside the server, not in a DM." };
+const RELINK_GITHUB: MessagePayload = { content: "I couldn't find your linked GitHub account. Run `/link` again to reconnect it." };
 
 export async function runCommand(
   data: CommandData,
@@ -83,7 +84,9 @@ export async function runCommand(
         return leaderboardMessage(board, program, {
           final: programStatus(program, now) === "ended",
           url: leaderboardUrl(cfg, program),
+          finalNote: cfg.finalResultsNote,
           members: await linkedMembers(env, board.rows.slice(0, 10).map((r) => r.login)),
+          linking: linkingEnabled(env),
         });
       }
       case "link": {
@@ -105,9 +108,31 @@ export async function runCommand(
       }
       case "me": {
         if (!user) return IN_SERVER_ONLY;
-        const link = await getLink(env, user.id);
+        let link = await getLink(env, user.id);
         if (!link) return { content: "You haven't linked a GitHub account yet. Run `/link` first." };
-        const merged = await countMergedPrs(env, cfg, link.githubLogin);
+        let merged: number;
+        try {
+          merged = await countMergedPrs(env, cfg, link.githubLogin);
+        } catch (err) {
+          if (!(err instanceof GithubError) || err.status !== 422) throw err;
+          let login: string | null;
+          try {
+            login = await getLoginById(env, link.githubId);
+          } catch (lookupError) {
+            if (lookupError instanceof GithubError && (lookupError.status === 403 || lookupError.status === 429)) throw lookupError;
+            return RELINK_GITHUB;
+          }
+          if (!login) return RELINK_GITHUB;
+          link = { ...link, githubLogin: login };
+          await saveLink(env, link);
+          // Retry once; another invalid login must not restart recovery.
+          try {
+            merged = await countMergedPrs(env, cfg, login);
+          } catch (retryError) {
+            if (retryError instanceof GithubError && retryError.status === 422) return RELINK_GITHUB;
+            throw retryError;
+          }
+        }
         // Catches up on a role if a merge was missed.
         const newRoles = await grantEarnedRoles(env, cfg, link, merged).catch((err) => {
           console.error("granting roles failed", err);
